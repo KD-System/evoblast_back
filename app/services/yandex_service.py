@@ -2,15 +2,22 @@
 Сервис для работы с Yandex Cloud ML SDK
 """
 import logging
-from typing import Optional, Tuple
+import tempfile
+import os
+from datetime import datetime
+from typing import Optional, Tuple, List
 from yandex_cloud_ml_sdk import YCloudML
+from yandex_cloud_ml_sdk.search_indexes import (
+    StaticIndexChunkingStrategy,
+    VectorSearchIndexType,
+)
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Глобальный SDK клиент
 _sdk: Optional[YCloudML] = None
+_current_vector_store_id: Optional[str] = None
 
 
 def get_sdk() -> YCloudML:
@@ -38,50 +45,52 @@ def get_sdk() -> YCloudML:
 def is_configured() -> bool:
     """Проверить, настроен ли Yandex Cloud"""
     settings = get_settings()
-    return bool(
-        settings.YANDEX_FOLDER_ID and 
-        settings.YANDEX_API_KEY and 
-        settings.VECTOR_STORE_ID
-    )
+    return bool(settings.YANDEX_FOLDER_ID and settings.YANDEX_API_KEY)
 
 
-def create_thread() -> str:
-    """Создать новый поток (thread) для беседы"""
-    sdk = get_sdk()
-    thread = sdk.threads.create()
-    logger.info(f"✅ Created new thread: {thread.id}")
-    return thread.id
+def get_vector_store_id() -> Optional[str]:
+    """Получить текущий Vector Store ID из кэша"""
+    global _current_vector_store_id
+    return _current_vector_store_id if _current_vector_store_id else None
 
 
-def get_thread(thread_id: str):
-    """Получить существующий поток"""
-    sdk = get_sdk()
-    return sdk.threads.get(thread_id)
+def set_vector_store_id(vector_store_id: str) -> None:
+    """Установить текущий Vector Store ID в кэш"""
+    global _current_vector_store_id
+    _current_vector_store_id = vector_store_id if vector_store_id else None
+    logger.info(f"✅ Vector Store ID set: {_current_vector_store_id}")
 
 
-def create_assistant() -> str:
-    """Создать ассистента с подключённой базой знаний"""
+def create_new_chat() -> Tuple[str, str]:
+    """Создать новый чат (thread + assistant)"""
     sdk = get_sdk()
     settings = get_settings()
     
-    # Подключаем векторное хранилище
-    search_tool = sdk.tools.search_index(settings.VECTOR_STORE_ID)
+    vector_store_id = get_vector_store_id()
     
-    # Создаём ассистента
-    assistant = sdk.assistants.create(
-        model="yandexgpt",
-        instruction=settings.ASSISTANT_INSTRUCTION,
-        tools=[search_tool],
-    )
+    thread = sdk.threads.create()
+    thread_id = thread.id
     
-    logger.info(f"✅ Created assistant: {assistant.id}")
-    return assistant.id
-
-
-def get_assistant(assistant_id: str):
-    """Получить существующего ассистента"""
-    sdk = get_sdk()
-    return sdk.assistants.get(assistant_id)
+    # Если есть Vector Store — подключаем базу знаний
+    if vector_store_id:
+        search_tool = sdk.tools.search_index(vector_store_id)
+        assistant = sdk.assistants.create(
+            model="yandexgpt",
+            instruction=settings.ASSISTANT_INSTRUCTION,
+            tools=[search_tool],
+        )
+    else:
+        # Без базы знаний
+        assistant = sdk.assistants.create(
+            model="yandexgpt",
+            instruction=settings.ASSISTANT_INSTRUCTION,
+        )
+    
+    assistant_id = assistant.id
+    
+    logger.info(f"✅ Created new chat: thread={thread_id}, has_kb={bool(vector_store_id)}")
+    
+    return thread_id, assistant_id
 
 
 def send_message_and_get_response(
@@ -89,78 +98,139 @@ def send_message_and_get_response(
     assistant_id: str, 
     message: str
 ) -> Tuple[str, list]:
-    """
-    Отправить сообщение и получить ответ от ассистента
-    
-    Returns:
-        Tuple[str, list]: (ответ, список цитат)
-    """
+    """Отправить сообщение и получить ответ"""
     sdk = get_sdk()
     settings = get_settings()
     
-    # Получаем thread
+    vector_store_id = get_vector_store_id()
+    
     thread = sdk.threads.get(thread_id)
-    
-    # Отправляем сообщение
     thread.write(message)
-    logger.info(f"📤 Message sent to thread: {thread_id}")
     
-    # Получаем или создаём ассистента
-    # Примечание: создаём нового ассистента для каждого запроса,
-    # чтобы гарантировать актуальные настройки
-    search_tool = sdk.tools.search_index(settings.VECTOR_STORE_ID)
-    assistant = sdk.assistants.create(
-        model="yandexgpt",
-        instruction=settings.ASSISTANT_INSTRUCTION,
-        tools=[search_tool],
-    )
+    # Если есть Vector Store — подключаем базу знаний
+    if vector_store_id:
+        search_tool = sdk.tools.search_index(vector_store_id)
+        assistant = sdk.assistants.create(
+            model="yandexgpt",
+            instruction=settings.ASSISTANT_INSTRUCTION,
+            tools=[search_tool],
+        )
+    else:
+        assistant = sdk.assistants.create(
+            model="yandexgpt",
+            instruction=settings.ASSISTANT_INSTRUCTION,
+        )
     
-    # Запускаем ассистента и ждём ответ
     run = assistant.run(thread)
     result = run.wait()
     
-    # Извлекаем ответ
     answer = result.text or "Извините, не смог сформировать ответ."
     
-    # Извлекаем цитаты (если есть)
     citations = []
     if hasattr(result, "citations") and result.citations:
         for citation in result.citations:
             for source in citation.sources:
                 if hasattr(source, "file") and hasattr(source.file, "id"):
-                    citations.append({
-                        "file_id": source.file.id,
-                        "type": "file"
-                    })
+                    citations.append({"file_id": source.file.id, "type": "file"})
     
-    logger.info(f"📥 Got response from assistant ({len(answer)} chars, {len(citations)} citations)")
+    logger.info(f"📥 Got response ({len(answer)} chars), kb={bool(vector_store_id)}")
     
     return answer, citations
 
 
-def create_new_chat() -> Tuple[str, str]:
-    """
-    Создать новый чат (thread + assistant)
+# ==========================================
+# File Operations
+# ==========================================
+
+def upload_file_to_yandex(file_content: bytes, filename: str) -> str:
+    """Загрузить файл в Yandex Cloud"""
+    sdk = get_sdk()
     
-    Returns:
-        Tuple[str, str]: (thread_id, assistant_id)
-    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp_file:
+        tmp_file.write(file_content)
+        tmp_path = tmp_file.name
+    
+    try:
+        file = sdk.files.upload(
+            tmp_path,
+            name=filename,
+            ttl_days=365,
+            expiration_policy="static"
+        )
+        logger.info(f"📤 File uploaded: {file.id}")
+        return file.id
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def delete_file_from_yandex(file_id: str) -> bool:
+    """Удалить файл из Yandex Cloud"""
+    sdk = get_sdk()
+    
+    try:
+        file = sdk.files.get(file_id)
+        file.delete()
+        logger.info(f"🗑️ File deleted: {file_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to delete file {file_id}: {e}")
+        return False
+
+
+def create_vector_store(yandex_file_ids: List[str]) -> str:
+    """Создать новый Vector Store со списком файлов"""
     sdk = get_sdk()
     settings = get_settings()
     
-    # Создаём поток
-    thread = sdk.threads.create()
-    thread_id = thread.id
+    if not yandex_file_ids:
+        raise ValueError("No files to index")
     
-    # Создаём ассистента
-    search_tool = sdk.tools.search_index(settings.VECTOR_STORE_ID)
-    assistant = sdk.assistants.create(
-        model="yandexgpt",
-        instruction=settings.ASSISTANT_INSTRUCTION,
-        tools=[search_tool],
+    files = []
+    for file_id in yandex_file_ids:
+        try:
+            file = sdk.files.get(file_id)
+            files.append(file)
+        except Exception as e:
+            logger.warning(f"⚠️ File {file_id} not found: {e}")
+    
+    if not files:
+        raise ValueError("No valid files found")
+    
+    index_name = f"evoblast-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+    
+    logger.info(f"🔄 Creating Vector Store: {index_name} with {len(files)} files...")
+    
+    operation = sdk.search_indexes.create_deferred(
+        files=files,
+        name=index_name,
+        index_type=VectorSearchIndexType(
+            doc_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-doc/latest",
+            query_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-query/latest",
+            chunking_strategy=StaticIndexChunkingStrategy(
+                max_chunk_size_tokens=700,
+                chunk_overlap_tokens=300,
+            ),
+        ),
+        ttl_days=365,
+        expiration_policy="static",
     )
-    assistant_id = assistant.id
     
-    logger.info(f"✅ Created new chat: thread={thread_id}, assistant={assistant_id}")
+    search_index = operation.wait()
     
-    return thread_id, assistant_id
+    logger.info(f"✅ Vector Store created: {search_index.id}")
+    return search_index.id
+
+
+def delete_vector_store(index_id: str) -> bool:
+    """Удалить Vector Store"""
+    sdk = get_sdk()
+    
+    try:
+        search_index = sdk.search_indexes.get(index_id)
+        search_index.delete()
+        logger.info(f"🗑️ Vector Store deleted: {index_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to delete Vector Store {index_id}: {e}")
+        return False

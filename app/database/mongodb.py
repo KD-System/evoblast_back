@@ -11,7 +11,6 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Глобальные переменные для подключения
 _client: Optional[AsyncIOMotorClient] = None
 _database: Optional[AsyncIOMotorDatabase] = None
 
@@ -26,11 +25,9 @@ async def connect_to_mongodb():
         _client = AsyncIOMotorClient(settings.MONGODB_URL)
         _database = _client[settings.MONGODB_DATABASE]
         
-        # Проверяем подключение
         await _client.admin.command('ping')
         logger.info(f"✅ Connected to MongoDB: {settings.MONGODB_DATABASE}")
         
-        # Создаём индексы
         await _create_indexes()
         
     except Exception as e:
@@ -64,13 +61,19 @@ async def _create_indexes():
     await _database.chat_history.create_index([("thread_id", 1), ("message_id", 1)])
     await _database.chat_history.create_index("user_id")
     
+    # Индексы для FILES
+    await _database.files.create_index("file_id", unique=True)
+    await _database.files.create_index("user_id")
+    await _database.files.create_index([("user_id", 1), ("created_at", -1)])
+    await _database.files.create_index("yandex_file_id")
+    
     logger.info("✅ MongoDB indexes created")
 
 
 def get_database() -> AsyncIOMotorDatabase:
     """Получить объект базы данных"""
     if _database is None:
-        raise RuntimeError("MongoDB not connected. Call connect_to_mongodb() first.")
+        raise RuntimeError("MongoDB not connected")
     return _database
 
 
@@ -89,6 +92,38 @@ async def is_connected() -> bool:
 
 
 # ==========================================
+# SETTINGS Operations (для VECTOR_STORE_ID)
+# ==========================================
+
+async def get_current_vector_store_id() -> Optional[str]:
+    """Получить текущий VECTOR_STORE_ID из БД"""
+    db = get_database()
+    
+    doc = await db.settings.find_one({"key": "vector_store_id"})
+    if doc:
+        return doc.get("value")
+    return None
+
+
+async def set_current_vector_store_id(vector_store_id: str) -> None:
+    """Сохранить текущий VECTOR_STORE_ID в БД"""
+    db = get_database()
+    
+    await db.settings.update_one(
+        {"key": "vector_store_id"},
+        {
+            "$set": {
+                "key": "vector_store_id",
+                "value": vector_store_id,
+                "updated_at": datetime.utcnow()
+            }
+        },
+        upsert=True
+    )
+    logger.info(f"✅ Vector Store ID updated in DB: {vector_store_id}")
+
+
+# ==========================================
 # CHAT_THREADS Operations
 # ==========================================
 
@@ -104,7 +139,6 @@ async def create_chat_thread(
     
     now = datetime.utcnow()
     
-    # Генерируем название чата, если не указано
     if not chat_name:
         chat_name = f"Чат от {now.strftime('%d.%m.%Y %H:%M')}"
     
@@ -120,13 +154,13 @@ async def create_chat_thread(
     }
     
     await db.chat_threads.insert_one(document)
-    logger.info(f"✅ Created chat thread: {thread_id} for user: {user_id}")
+    logger.info(f"✅ Created chat thread: {thread_id}")
     
     return document
 
 
 async def get_chat_thread(thread_id: str) -> Optional[Dict[str, Any]]:
-    """Получить информацию о чате по thread_id"""
+    """Получить информацию о чате"""
     db = get_database()
     return await db.chat_threads.find_one({"thread_id": thread_id})
 
@@ -149,22 +183,15 @@ async def get_user_chats(user_id: str) -> List[Dict[str, Any]]:
     """Получить список чатов пользователя"""
     db = get_database()
     
-    cursor = db.chat_threads.find(
-        {"user_id": user_id}
-    ).sort("created_at", -1)
-    
-    chats = await cursor.to_list(length=100)
-    return chats
+    cursor = db.chat_threads.find({"user_id": user_id}).sort("created_at", -1)
+    return await cursor.to_list(length=100)
 
 
 async def delete_chat_thread(thread_id: str) -> bool:
     """Удалить чат и все его сообщения"""
     db = get_database()
     
-    # Удаляем сообщения
     await db.chat_history.delete_many({"thread_id": thread_id})
-    
-    # Удаляем чат
     result = await db.chat_threads.delete_one({"thread_id": thread_id})
     
     return result.deleted_count > 0
@@ -177,7 +204,7 @@ async def delete_chat_thread(thread_id: str) -> bool:
 async def add_message(
     user_id: str,
     thread_id: str,
-    role: str,  # "user" или "assistant"
+    role: str,
     content: str,
     meta: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -186,7 +213,6 @@ async def add_message(
     
     now = datetime.utcnow()
     
-    # Получаем следующий message_id для этого чата
     last_message = await db.chat_history.find_one(
         {"thread_id": thread_id},
         sort=[("message_id", -1)]
@@ -206,11 +232,7 @@ async def add_message(
     }
     
     await db.chat_history.insert_one(document)
-    
-    # Обновляем updated_at в chat_threads
     await update_chat_thread(thread_id, {})
-    
-    logger.debug(f"📝 Added message #{message_id} to thread: {thread_id}")
     
     return document
 
@@ -219,15 +241,116 @@ async def get_chat_history(thread_id: str) -> List[Dict[str, Any]]:
     """Получить историю сообщений чата"""
     db = get_database()
     
-    cursor = db.chat_history.find(
-        {"thread_id": thread_id}
-    ).sort("message_id", 1)
-    
-    messages = await cursor.to_list(length=1000)
-    return messages
+    cursor = db.chat_history.find({"thread_id": thread_id}).sort("message_id", 1)
+    return await cursor.to_list(length=1000)
 
 
-async def get_message_count(thread_id: str) -> int:
-    """Получить количество сообщений в чате"""
+# ==========================================
+# FILES Operations
+# ==========================================
+
+async def create_file_record(
+    user_id: str,
+    filename: str,
+    file_type: str,
+    file_size: int,
+    yandex_file_id: str,
+    content: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+    status: str = "ready"
+) -> Dict[str, Any]:
+    """Создать запись о файле"""
     db = get_database()
-    return await db.chat_history.count_documents({"thread_id": thread_id})
+    
+    now = datetime.utcnow()
+    
+    document = {
+        "file_id": str(uuid_lib.uuid4()),
+        "user_id": user_id,
+        "filename": filename,
+        "file_type": file_type,
+        "file_size": file_size,
+        "yandex_file_id": yandex_file_id,
+        "status": status,
+        "metadata": metadata or {},
+        "created_at": now,
+        "updated_at": now,
+        "content": content
+    }
+    
+    await db.files.insert_one(document)
+    logger.info(f"✅ Created file record: {filename}")
+    
+    return document
+
+
+async def get_file_by_id(file_id: str) -> Optional[Dict[str, Any]]:
+    """Получить файл по ID"""
+    db = get_database()
+    return await db.files.find_one({"file_id": file_id})
+
+
+async def get_user_files(user_id: str) -> List[Dict[str, Any]]:
+    """Получить список файлов пользователя"""
+    db = get_database()
+    
+    cursor = db.files.find(
+        {"user_id": user_id, "status": {"$ne": "deleted"}}
+    ).sort("created_at", -1)
+    
+    return await cursor.to_list(length=100)
+
+
+async def get_all_active_files() -> List[Dict[str, Any]]:
+    """Получить ВСЕ активные файлы (для переиндексации)"""
+    db = get_database()
+    
+    cursor = db.files.find({"status": {"$ne": "deleted"}})
+    return await cursor.to_list(length=1000)
+
+
+async def delete_file_record(file_id: str) -> Optional[Dict[str, Any]]:
+    """Удалить запись о файле и вернуть её данные"""
+    db = get_database()
+    
+    # Сначала получаем файл
+    file = await db.files.find_one({"file_id": file_id})
+    if not file:
+        return None
+    
+    # Помечаем как удалённый
+    await db.files.update_one(
+        {"file_id": file_id},
+        {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}
+    )
+    
+    return file
+
+
+async def delete_all_user_files(user_id: str) -> List[Dict[str, Any]]:
+    """Удалить все файлы пользователя и вернуть их"""
+    db = get_database()
+    
+    # Получаем все файлы
+    cursor = db.files.find({"user_id": user_id, "status": {"$ne": "deleted"}})
+    files = await cursor.to_list(length=1000)
+    
+    # Помечаем как удалённые
+    await db.files.update_many(
+        {"user_id": user_id, "status": {"$ne": "deleted"}},
+        {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}
+    )
+    
+    return files
+
+
+async def delete_all_files() -> int:
+    """Удалить ВСЕ файлы (пометить как deleted)"""
+    db = get_database()
+    
+    result = await db.files.update_many(
+        {"status": {"$ne": "deleted"}},
+        {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}
+    )
+    
+    return result.modified_count

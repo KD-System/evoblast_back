@@ -1,0 +1,223 @@
+"""
+Роутер для работы с файлами
+"""
+import logging
+from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi.responses import Response
+
+from app.models.schemas import (
+    FileInfo,
+    FileListResponse,
+    FileUploadResponse,
+    FileDeleteResponse,
+    FilesDeleteAllResponse,
+    FileStatus,
+)
+from app.services import file_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/evoblast", tags=["Files"])
+
+
+def _to_file_info(f: dict) -> FileInfo:
+    """Конвертировать dict в FileInfo"""
+    status = f.get("status", "ready")
+    if status not in [s.value for s in FileStatus]:
+        status = "ready"
+    
+    return FileInfo(
+        file_id=f["file_id"],
+        user_id=f["user_id"],
+        filename=f["filename"],
+        file_type=f["file_type"],
+        file_size=f["file_size"],
+        status=FileStatus(status),
+        metadata=f.get("metadata", {}),
+        created_at=f["created_at"],
+        updated_at=f["updated_at"],
+        vectorstore_file_id=f.get("yandex_file_id")
+    )
+
+
+@router.post(
+    "/upload",
+    response_model=FileUploadResponse,
+    summary="Загрузить файлы",
+    description="""
+    Загрузка файлов с **автоматической переиндексацией**.
+    
+    **Ограничения:**
+    - Максимум 5 файлов за раз
+    - Максимальный размер: 10MB
+    - Форматы: txt, pdf, doc, docx, md, json, csv, xls, xlsx
+    
+    ⚠️ Индексация занимает ~10 секунд
+    """
+)
+async def upload_files(
+    user_id: str = Query(..., description="ID пользователя (кто загружает)"),
+    files: List[UploadFile] = File(..., description="Файлы (макс. 5)")
+):
+    logger.info(f"📤 Upload from user: {user_id}, files: {len(files)}")
+    
+    try:
+        uploaded_files, errors = await file_service.upload_files(
+            user_id=user_id,
+            files=files
+        )
+        
+        file_infos = [_to_file_info(f) for f in uploaded_files]
+        
+        message = f"✅ Загружено: {len(uploaded_files)}"
+        if errors:
+            message += f". ⚠️ Ошибки: {'; '.join(errors)}"
+        
+        return FileUploadResponse(
+            message=message,
+            files=file_infos,
+            total_uploaded=len(uploaded_files)
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Upload error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/files",
+    response_model=FileListResponse,
+    summary="Список всех файлов",
+    description="Возвращает ВСЕ загруженные файлы (видны всем пользователям)"
+)
+async def get_files():
+    """Получить список ВСЕХ файлов"""
+    try:
+        files = await file_service.get_all_files()
+        file_infos = [_to_file_info(f) for f in files]
+        
+        return FileListResponse(
+            user_id="all",
+            files=file_infos,
+            total=len(file_infos)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/files/my",
+    response_model=FileListResponse,
+    summary="Мои файлы",
+    description="Возвращает файлы, загруженные конкретным пользователем"
+)
+async def get_my_files(
+    user_id: str = Query(..., description="ID пользователя")
+):
+    """Получить файлы конкретного пользователя"""
+    try:
+        files = await file_service.get_user_files(user_id)
+        file_infos = [_to_file_info(f) for f in files]
+        
+        return FileListResponse(
+            user_id=user_id,
+            files=file_infos,
+            total=len(file_infos)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/file/{file_id}", summary="Информация о файле")
+async def get_file(file_id: str):
+    try:
+        return await file_service.get_file(file_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download/{file_id}", summary="Скачать файл")
+async def download_file(file_id: str):
+    try:
+        file = await file_service.get_file(file_id)
+        content = file.get("content", "")
+        filename = file.get("filename", "file.txt")
+        
+        return Response(
+            content=content.encode('utf-8'),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/file/{file_id}",
+    response_model=FileDeleteResponse,
+    summary="Удалить файл",
+    description="Удаляет файл и **автоматически** пересоздаёт Vector Store"
+)
+async def delete_file(file_id: str):
+    logger.info(f"🗑️ Deleting file: {file_id}")
+    
+    try:
+        deleted = await file_service.delete_file(file_id)
+        
+        return FileDeleteResponse(
+            message="✅ Файл удалён, индекс обновлён",
+            file_id=file_id,
+            deleted=deleted
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/files/all",
+    response_model=FilesDeleteAllResponse,
+    summary="Удалить ВСЕ файлы",
+    description="Удаляет ВСЕ файлы и очищает Vector Store"
+)
+async def delete_all_files():
+    """Удалить ВСЕ файлы"""
+    logger.info(f"🗑️ Deleting ALL files")
+    
+    try:
+        deleted_count = await file_service.delete_all_files()
+        
+        return FilesDeleteAllResponse(
+            message=f"✅ Удалено файлов: {deleted_count}. Vector Store очищен.",
+            user_id="all",
+            deleted_count=deleted_count
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vector-store", summary="Текущий Vector Store ID")
+async def get_vector_store():
+    """Получить текущий Vector Store ID"""
+    from app.services import yandex_service
+    
+    vector_store_id = yandex_service.get_vector_store_id()
+    db_id = await file_service.get_current_vector_store_id()
+    
+    return {
+        "current_vector_store_id": vector_store_id or None,
+        "db_vector_store_id": db_id or None,
+        "has_knowledge_base": bool(vector_store_id)
+    }

@@ -14,8 +14,11 @@ pymongo>=4.6.1
 # Yandex Cloud ML SDK
 yandex-cloud-ml-sdk>=0.2.0
 
+# JWT Auth
+python-jose[cryptography]>=3.3.0
+
 # Utils
 python-dotenv>=1.0.0
 
-# HTTP (версия совместимая с yandex-cloud-ml-sdk)
+# HTTP
 httpx>=0.27.0

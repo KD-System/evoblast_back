@@ -1,6 +1,5 @@
 """
 Evoblast Backend API
-FastAPI приложение с MongoDB и Yandex Cloud ML
 """
 import logging
 from contextlib import asynccontextmanager
@@ -13,10 +12,9 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.database import mongodb
 from app.services import yandex_service
-from app.routers import chat_router
+from app.routers import chat_router, files_router, auth_router
 from app.models.schemas import HealthResponse
 
-# === Настройка логирования ===
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -24,86 +22,81 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# === Lifespan (startup/shutdown) ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения"""
-    # Startup
     logger.info("🚀 Starting Evoblast Backend...")
     
     try:
         await mongodb.connect_to_mongodb()
         logger.info("✅ MongoDB connected")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to MongoDB: {e}")
+        logger.error(f"❌ MongoDB connection failed: {e}")
     
-    # Проверяем конфигурацию Yandex
+    yandex_service.set_vector_store_id("")
+    logger.info("ℹ️ Vector Store: empty (will be created on first file upload)")
+    
     if yandex_service.is_configured():
         logger.info("✅ Yandex Cloud ML configured")
     else:
-        logger.warning("⚠️ Yandex Cloud ML not fully configured!")
+        logger.warning("⚠️ Yandex Cloud ML not configured!")
     
     yield
     
-    # Shutdown
-    logger.info("🛑 Shutting down Evoblast Backend...")
+    logger.info("🛑 Shutting down...")
     await mongodb.close_mongodb_connection()
 
 
-# === FastAPI App ===
 settings = get_settings()
 
 app = FastAPI(
     title="EVOBLAST API",
     description="""
-    🚀 **Evoblast Backend API** с векторным поиском на базе Yandex Cloud ML
+    🚀 **Evoblast Backend API** с автоматической индексацией
     
-    ## Функциональность
+    ## Auth
+    - **GET /api/evoblast/user** - Информация о пользователе (JWT)
     
-    ### 💬 Chat
-    - **POST /api/evoblast/mainthread** - Отправить сообщение в чат
-    - **GET /api/evoblast/chats** - Получить список чатов пользователя
-    - **GET /api/evoblast/history** - Получить историю сообщений чата
+    ## Chat
+    - **POST /api/evoblast/mainthread** - Отправить сообщение
+    - **GET /api/evoblast/chats** - Список чатов
+    - **GET /api/evoblast/history** - История чата
     - **DELETE /api/evoblast/chat** - Удалить чат
     
-    ### 🏥 Health
-    - **GET /health** - Проверка состояния сервиса
+    ## Files
+    - **POST /api/evoblast/upload** - Загрузить файлы
+    - **GET /api/evoblast/files** - Список всех файлов
+    - **GET /api/evoblast/files/my** - Мои файлы
+    - **DELETE /api/evoblast/file/{id}** - Удалить файл
+    - **DELETE /api/evoblast/files/all** - Удалить все файлы
     """,
-    version="2.0.0",
+    version="3.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
 )
 
-
-# === CORS настройки ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://cms-kd-systems.ru",
         "http://localhost:3000",
         "http://158.160.200.70:3000",
-        "*"  # Для тестирования
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# === Подключаем роутеры ===
+# Подключаем роутеры
+app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(files_router)
 
 
-# === Health Check ===
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    tags=["Health"],
-    summary="Проверка состояния сервиса"
-)
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """🏥 Health check endpoint для мониторинга"""
     mongodb_connected = await mongodb.is_connected()
     yandex_configured = yandex_service.is_configured()
     
@@ -116,30 +109,23 @@ async def health_check():
     )
 
 
-# === Root endpoint ===
 @app.get("/", tags=["Root"])
 async def root():
-    """Корневой эндпоинт"""
+    vector_store_id = yandex_service.get_vector_store_id()
     return {
         "service": "Evoblast Backend",
-        "version": "2.0.0",
-        "docs": "/docs",
-        "health": "/health"
+        "version": "3.1.0",
+        "has_knowledge_base": bool(vector_store_id),
+        "docs": "/docs"
     }
 
 
-# === Обработка ошибок ===
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Глобальный обработчик ошибок"""
-    logger.error(f"❌ Unhandled exception: {str(exc)}", exc_info=True)
+    logger.error(f"❌ Error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={
-            "error": "Internal server error",
-            "detail": str(exc) if settings.DEBUG else "An error occurred",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        content={"error": "Internal server error", "detail": str(exc)}
     )
 
 
