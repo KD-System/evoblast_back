@@ -46,13 +46,16 @@ async def process_message(
         
         thread_id, assistant_id = yandex_service.create_new_chat()
         
+        # Генерируем красивое название чата
+        chat_name = yandex_service.generate_chat_name(message)
+
         # Сохраняем в базу
         await mongodb.create_chat_thread(
             user_id=user_id,
             thread_id=thread_id,
             assistant_id=assistant_id,
             vectorstore_id=settings.VECTOR_STORE_ID,
-            chat_name=f"Чат: {message[:30]}..." if len(message) > 30 else f"Чат: {message}"
+            chat_name=chat_name
         )
         
         new_chat_created = True
