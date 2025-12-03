@@ -61,6 +61,57 @@ def set_vector_store_id(vector_store_id: str) -> None:
     logger.info(f"✅ Vector Store ID set: {_current_vector_store_id}")
 
 
+def generate_chat_name(message: str) -> str:
+    """
+    Генерирует красивое название чата на основе первого сообщения.
+
+    Args:
+        message: Первое сообщение пользователя
+
+    Returns:
+        Красивое название чата
+    """
+    sdk = get_sdk()
+
+    prompt = f"""Сгенерируй короткое и красивое название для чата на основе сообщения пользователя.
+
+Правила:
+- Название должно быть на русском языке
+- Максимум 5-6 слов
+- Без кавычек и лишних символов
+- Отражать суть вопроса/темы
+- Начинаться с маленькой буквы
+
+Примеры:
+- "как выращивать огурцы" → выращивание огурцов
+- "что такое любовь" → рассуждение о любви
+- "помоги написать код на python" → помощь с кодом на Python
+- "расскажи про квантовую физику" → основы квантовой физики
+
+Сообщение пользователя: {message}
+
+Название чата:"""
+
+    try:
+        model = sdk.models.completions("yandexgpt-lite")
+        result = model.configure(temperature=0.3).run(prompt)
+
+        chat_name = result.alternatives[0].text.strip()
+        # Убираем кавычки если есть
+        chat_name = chat_name.strip('"\'«»')
+
+        if not chat_name or len(chat_name) > 100:
+            chat_name = message[:50] if len(message) > 50 else message
+
+        logger.info(f"✅ Generated chat name: {chat_name}")
+        return chat_name
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to generate chat name: {e}")
+        # Fallback к старой логике
+        return f"Чат: {message[:30]}..." if len(message) > 30 else f"Чат: {message}"
+
+
 def create_new_chat() -> Tuple[str, str]:
     """Создать новый чат (thread + assistant)"""
     sdk = get_sdk()
