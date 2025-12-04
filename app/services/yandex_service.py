@@ -1,6 +1,7 @@
 """
-Сервис для работы с Yandex Cloud ML SDK
+Сервис для работы с Yandex Cloud ML SDK (асинхронная версия)
 """
+import asyncio
 import logging
 import tempfile
 import os
@@ -23,22 +24,22 @@ _current_vector_store_id: Optional[str] = None
 def get_sdk() -> YCloudML:
     """Получить инициализированный SDK"""
     global _sdk
-    
+
     if _sdk is None:
         settings = get_settings()
-        
+
         if not settings.YANDEX_FOLDER_ID:
             raise RuntimeError("YANDEX_FOLDER_ID not configured")
-        
+
         if not settings.YANDEX_API_KEY:
             raise RuntimeError("YANDEX_API_KEY not configured")
-        
+
         _sdk = YCloudML(
             folder_id=settings.YANDEX_FOLDER_ID,
             auth=settings.YANDEX_API_KEY
         )
         logger.info("✅ Yandex Cloud ML SDK initialized")
-    
+
     return _sdk
 
 
@@ -61,16 +62,12 @@ def set_vector_store_id(vector_store_id: str) -> None:
     logger.info(f"✅ Vector Store ID set: {_current_vector_store_id}")
 
 
-def generate_chat_name(message: str) -> str:
-    """
-    Генерирует красивое название чата на основе первого сообщения.
+# ==========================================
+# Синхронные версии (для asyncio.to_thread)
+# ==========================================
 
-    Args:
-        message: Первое сообщение пользователя
-
-    Returns:
-        Красивое название чата
-    """
+def _generate_chat_name_sync(message: str) -> str:
+    """Синхронная генерация названия чата"""
     sdk = get_sdk()
 
     prompt = f"""Сгенерируй короткое и красивое название для чата на основе сообщения пользователя.
@@ -97,7 +94,6 @@ def generate_chat_name(message: str) -> str:
         result = model.configure(temperature=0.3).run(prompt)
 
         chat_name = result.alternatives[0].text.strip()
-        # Убираем кавычки если есть
         chat_name = chat_name.strip('"\'«»')
 
         if not chat_name or len(chat_name) > 100:
@@ -108,21 +104,19 @@ def generate_chat_name(message: str) -> str:
 
     except Exception as e:
         logger.warning(f"⚠️ Failed to generate chat name: {e}")
-        # Fallback к старой логике
         return f"Чат: {message[:30]}..." if len(message) > 30 else f"Чат: {message}"
 
 
-def create_new_chat() -> Tuple[str, str]:
-    """Создать новый чат (thread + assistant)"""
+def _create_new_chat_sync() -> Tuple[str, str]:
+    """Синхронное создание нового чата"""
     sdk = get_sdk()
     settings = get_settings()
-    
+
     vector_store_id = get_vector_store_id()
-    
+
     thread = sdk.threads.create()
     thread_id = thread.id
-    
-    # Если есть Vector Store — подключаем базу знаний
+
     if vector_store_id:
         search_tool = sdk.tools.search_index(vector_store_id)
         assistant = sdk.assistants.create(
@@ -131,34 +125,32 @@ def create_new_chat() -> Tuple[str, str]:
             tools=[search_tool],
         )
     else:
-        # Без базы знаний
         assistant = sdk.assistants.create(
             model="yandexgpt",
             instruction=settings.ASSISTANT_INSTRUCTION,
         )
-    
+
     assistant_id = assistant.id
-    
+
     logger.info(f"✅ Created new chat: thread={thread_id}, has_kb={bool(vector_store_id)}")
-    
+
     return thread_id, assistant_id
 
 
-def send_message_and_get_response(
-    thread_id: str, 
-    assistant_id: str, 
+def _send_message_and_get_response_sync(
+    thread_id: str,
+    assistant_id: str,
     message: str
 ) -> Tuple[str, list]:
-    """Отправить сообщение и получить ответ"""
+    """Синхронная отправка сообщения"""
     sdk = get_sdk()
     settings = get_settings()
-    
+
     vector_store_id = get_vector_store_id()
-    
+
     thread = sdk.threads.get(thread_id)
     thread.write(message)
-    
-    # Если есть Vector Store — подключаем базу знаний
+
     if vector_store_id:
         search_tool = sdk.tools.search_index(vector_store_id)
         assistant = sdk.assistants.create(
@@ -171,36 +163,32 @@ def send_message_and_get_response(
             model="yandexgpt",
             instruction=settings.ASSISTANT_INSTRUCTION,
         )
-    
+
     run = assistant.run(thread)
     result = run.wait()
-    
+
     answer = result.text or "Извините, не смог сформировать ответ."
-    
+
     citations = []
     if hasattr(result, "citations") and result.citations:
         for citation in result.citations:
             for source in citation.sources:
                 if hasattr(source, "file") and hasattr(source.file, "id"):
                     citations.append({"file_id": source.file.id, "type": "file"})
-    
+
     logger.info(f"📥 Got response ({len(answer)} chars), kb={bool(vector_store_id)}")
-    
+
     return answer, citations
 
 
-# ==========================================
-# File Operations
-# ==========================================
-
-def upload_file_to_yandex(file_content: bytes, filename: str) -> str:
-    """Загрузить файл в Yandex Cloud"""
+def _upload_file_to_yandex_sync(file_content: bytes, filename: str) -> str:
+    """Синхронная загрузка файла"""
     sdk = get_sdk()
-    
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp_file:
         tmp_file.write(file_content)
         tmp_path = tmp_file.name
-    
+
     try:
         file = sdk.files.upload(
             tmp_path,
@@ -215,10 +203,10 @@ def upload_file_to_yandex(file_content: bytes, filename: str) -> str:
             os.remove(tmp_path)
 
 
-def delete_file_from_yandex(file_id: str) -> bool:
-    """Удалить файл из Yandex Cloud"""
+def _delete_file_from_yandex_sync(file_id: str) -> bool:
+    """Синхронное удаление файла"""
     sdk = get_sdk()
-    
+
     try:
         file = sdk.files.get(file_id)
         file.delete()
@@ -229,14 +217,14 @@ def delete_file_from_yandex(file_id: str) -> bool:
         return False
 
 
-def create_vector_store(yandex_file_ids: List[str]) -> str:
-    """Создать новый Vector Store со списком файлов"""
+def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
+    """Синхронное создание Vector Store"""
     sdk = get_sdk()
     settings = get_settings()
-    
+
     if not yandex_file_ids:
         raise ValueError("No files to index")
-    
+
     files = []
     for file_id in yandex_file_ids:
         try:
@@ -244,14 +232,14 @@ def create_vector_store(yandex_file_ids: List[str]) -> str:
             files.append(file)
         except Exception as e:
             logger.warning(f"⚠️ File {file_id} not found: {e}")
-    
+
     if not files:
         raise ValueError("No valid files found")
-    
+
     index_name = f"evoblast-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
-    
+
     logger.info(f"🔄 Creating Vector Store: {index_name} with {len(files)} files...")
-    
+
     operation = sdk.search_indexes.create_deferred(
         files=files,
         name=index_name,
@@ -266,17 +254,17 @@ def create_vector_store(yandex_file_ids: List[str]) -> str:
         ttl_days=365,
         expiration_policy="static",
     )
-    
+
     search_index = operation.wait()
-    
+
     logger.info(f"✅ Vector Store created: {search_index.id}")
     return search_index.id
 
 
-def delete_vector_store(index_id: str) -> bool:
-    """Удалить Vector Store"""
+def _delete_vector_store_sync(index_id: str) -> bool:
+    """Синхронное удаление Vector Store"""
     sdk = get_sdk()
-    
+
     try:
         search_index = sdk.search_indexes.get(index_id)
         search_index.delete()
@@ -285,3 +273,51 @@ def delete_vector_store(index_id: str) -> bool:
     except Exception as e:
         logger.error(f"❌ Failed to delete Vector Store {index_id}: {e}")
         return False
+
+
+# ==========================================
+# Асинхронные обёртки (публичный API)
+# ==========================================
+
+async def generate_chat_name(message: str) -> str:
+    """Генерирует красивое название чата на основе первого сообщения"""
+    return await asyncio.to_thread(_generate_chat_name_sync, message)
+
+
+async def create_new_chat() -> Tuple[str, str]:
+    """Создать новый чат (thread + assistant)"""
+    return await asyncio.to_thread(_create_new_chat_sync)
+
+
+async def send_message_and_get_response(
+    thread_id: str,
+    assistant_id: str,
+    message: str
+) -> Tuple[str, list]:
+    """Отправить сообщение и получить ответ"""
+    return await asyncio.to_thread(
+        _send_message_and_get_response_sync,
+        thread_id,
+        assistant_id,
+        message
+    )
+
+
+async def upload_file_to_yandex(file_content: bytes, filename: str) -> str:
+    """Загрузить файл в Yandex Cloud"""
+    return await asyncio.to_thread(_upload_file_to_yandex_sync, file_content, filename)
+
+
+async def delete_file_from_yandex(file_id: str) -> bool:
+    """Удалить файл из Yandex Cloud"""
+    return await asyncio.to_thread(_delete_file_from_yandex_sync, file_id)
+
+
+async def create_vector_store(yandex_file_ids: List[str]) -> str:
+    """Создать новый Vector Store со списком файлов"""
+    return await asyncio.to_thread(_create_vector_store_sync, yandex_file_ids)
+
+
+async def delete_vector_store(index_id: str) -> bool:
+    """Удалить Vector Store"""
+    return await asyncio.to_thread(_delete_vector_store_sync, index_id)

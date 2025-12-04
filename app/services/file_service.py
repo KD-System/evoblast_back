@@ -42,17 +42,17 @@ async def _rebuild_vector_store() -> Optional[str]:
     # Если файлов нет — удаляем старый Vector Store и сбрасываем ID
     if not yandex_file_ids:
         logger.warning("⚠️ No files to index, clearing Vector Store")
-        
+
         if old_vector_store_id:
-            yandex_service.delete_vector_store(old_vector_store_id)
-        
+            await yandex_service.delete_vector_store(old_vector_store_id)
+
         await mongodb.set_current_vector_store_id("")
         yandex_service.set_vector_store_id("")
-        
+
         return None
-    
+
     # Создаём новый Vector Store
-    new_vector_store_id = yandex_service.create_vector_store(yandex_file_ids)
+    new_vector_store_id = await yandex_service.create_vector_store(yandex_file_ids)
     
     # Сохраняем в MongoDB
     await mongodb.set_current_vector_store_id(new_vector_store_id)
@@ -62,7 +62,7 @@ async def _rebuild_vector_store() -> Optional[str]:
     
     # Удаляем старый Vector Store
     if old_vector_store_id and old_vector_store_id != new_vector_store_id:
-        yandex_service.delete_vector_store(old_vector_store_id)
+        await yandex_service.delete_vector_store(old_vector_store_id)
     
     logger.info(f"✅ Vector Store rebuilt: {new_vector_store_id}")
     return new_vector_store_id
@@ -100,7 +100,7 @@ async def upload_files(
             except:
                 text_content = ""
             
-            yandex_file_id = yandex_service.upload_file_to_yandex(content, file.filename)
+            yandex_file_id = await yandex_service.upload_file_to_yandex(content, file.filename)
             
             file_record = await mongodb.create_file_record(
                 user_id=user_id,
@@ -177,7 +177,7 @@ async def delete_file(file_id: str) -> bool:
         raise ValueError(f"Файл не найден: {file_id}")
     
     if file.get("yandex_file_id"):
-        yandex_service.delete_file_from_yandex(file["yandex_file_id"])
+        await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
     
     try:
         await _rebuild_vector_store()
@@ -196,7 +196,7 @@ async def delete_all_files() -> int:
     for file in files:
         if file.get("yandex_file_id"):
             try:
-                yandex_service.delete_file_from_yandex(file["yandex_file_id"])
+                await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
             except:
                 pass
     

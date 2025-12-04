@@ -44,10 +44,10 @@ async def process_message(
         # Создаём новый чат
         logger.info(f"Creating new chat for user: {user_id}")
         
-        thread_id, assistant_id = yandex_service.create_new_chat()
-        
+        thread_id, assistant_id = await yandex_service.create_new_chat()
+
         # Генерируем красивое название чата
-        chat_name = yandex_service.generate_chat_name(message)
+        chat_name = await yandex_service.generate_chat_name(message)
 
         # Сохраняем в базу
         await mongodb.create_chat_thread(
@@ -74,7 +74,7 @@ async def process_message(
     )
     
     # Отправляем сообщение ассистенту и получаем ответ
-    answer, citations = yandex_service.send_message_and_get_response(
+    answer, citations = await yandex_service.send_message_and_get_response(
         thread_id=thread_id,
         assistant_id=assistant_id,
         message=message
