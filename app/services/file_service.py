@@ -12,8 +12,8 @@ from app.services import yandex_service
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', 'xlsx'}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-MAX_FILES_PER_UPLOAD = 5
+MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
+MAX_FILES_PER_UPLOAD = 10
 
 
 def get_file_extension(filename: str) -> str:
