@@ -174,21 +174,21 @@ async def get_file(file_id: str):
 
 @router.get("/download/{file_id}", summary="Скачать файл")
 async def download_file(file_id: str):
-    """Скачать файл из Yandex Cloud"""
-    from app.services import yandex_service
+    """Скачать файл из MongoDB (base64)"""
+    import base64
     from urllib.parse import quote
 
     try:
         # Получаем информацию о файле из БД
         file_info = await file_service.get_file(file_id)
-        yandex_file_id = file_info.get("yandex_file_id")
         filename = file_info.get("filename", "file")
+        binary_content_b64 = file_info.get("binary_content")
 
-        if not yandex_file_id:
-            raise HTTPException(status_code=404, detail="Файл не найден в Yandex Cloud")
+        if not binary_content_b64:
+            raise HTTPException(status_code=404, detail="Контент файла не найден")
 
-        # Скачиваем файл из Yandex Cloud
-        content = await yandex_service.download_file_from_yandex(yandex_file_id)
+        # Декодируем из base64
+        content = base64.b64decode(binary_content_b64)
 
         # Определяем MIME-тип
         file_type = file_info.get("file_type", "").lower()
