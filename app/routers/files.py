@@ -3,7 +3,7 @@
 """
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, BackgroundTasks
 from fastapi.responses import Response
 
 from app.models.schemas import (
@@ -26,7 +26,7 @@ def _to_file_info(f: dict) -> FileInfo:
     status = f.get("status", "ready")
     if status not in [s.value for s in FileStatus]:
         status = "ready"
-    
+
     return FileInfo(
         file_id=f["file_id"],
         user_id=f["user_id"],
@@ -46,45 +46,72 @@ def _to_file_info(f: dict) -> FileInfo:
     response_model=FileUploadResponse,
     summary="Загрузить файлы",
     description="""
-    Загрузка файлов с **автоматической переиндексацией**.
-    
+    Загрузка файлов с **фоновой индексацией**.
+
     **Ограничения:**
-    - Максимум 5 файлов за раз
-    - Максимальный размер: 10MB
+    - Максимум 10 файлов за раз
+    - Максимальный размер: 30MB
     - Форматы: txt, pdf, doc, docx, md, json, csv, xls, xlsx
-    
-    ⚠️ Индексация занимает ~10 секунд
+
+    ✅ Ответ возвращается сразу после загрузки файлов.
+    ⏳ Индексация выполняется в фоне (~10-30 сек).
+    📊 Статус индексации: GET /api/evoblast/indexing-status
     """
 )
 async def upload_files(
+    background_tasks: BackgroundTasks,
     user_id: str = Query(..., description="ID пользователя (кто загружает)"),
-    files: List[UploadFile] = File(..., description="Файлы (макс. 5)")
+    files: List[UploadFile] = File(..., description="Файлы (макс. 10)")
 ):
     logger.info(f"📤 Upload from user: {user_id}, files: {len(files)}")
-    
+
     try:
+        # Загружаем файлы (быстро)
         uploaded_files, errors = await file_service.upload_files(
             user_id=user_id,
             files=files
         )
-        
+
+        # Запускаем индексацию в фоне
+        if uploaded_files:
+            background_tasks.add_task(file_service.rebuild_vector_store_background)
+
         file_infos = [_to_file_info(f) for f in uploaded_files]
-        
-        message = f"✅ Загружено: {len(uploaded_files)}"
+
+        message = f"✅ Загружено: {len(uploaded_files)}. ⏳ Индексация запущена в фоне."
         if errors:
-            message += f". ⚠️ Ошибки: {'; '.join(errors)}"
-        
+            message += f" ⚠️ Ошибки: {'; '.join(errors)}"
+
         return FileUploadResponse(
             message=message,
             files=file_infos,
             total_uploaded=len(uploaded_files)
         )
-        
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"❌ Upload error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/indexing-status",
+    summary="Статус индексации",
+    description="Проверить статус фоновой индексации файлов"
+)
+async def get_indexing_status():
+    """Получить статус индексации"""
+    from app.services import yandex_service
+
+    status = file_service.get_indexing_status()
+    vector_store_id = yandex_service.get_vector_store_id()
+
+    return {
+        **status,
+        "vector_store_id": vector_store_id or None,
+        "has_knowledge_base": bool(vector_store_id)
+    }
 
 
 @router.get(
@@ -98,13 +125,13 @@ async def get_files():
     try:
         files = await file_service.get_all_files()
         file_infos = [_to_file_info(f) for f in files]
-        
+
         return FileListResponse(
             user_id="all",
             files=file_infos,
             total=len(file_infos)
         )
-        
+
     except Exception as e:
         logger.error(f"❌ Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -123,13 +150,13 @@ async def get_my_files(
     try:
         files = await file_service.get_user_files(user_id)
         file_infos = [_to_file_info(f) for f in files]
-        
+
         return FileListResponse(
             user_id=user_id,
             files=file_infos,
             total=len(file_infos)
         )
-        
+
     except Exception as e:
         logger.error(f"❌ Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -151,7 +178,7 @@ async def download_file(file_id: str):
         file = await file_service.get_file(file_id)
         content = file.get("content", "")
         filename = file.get("filename", "file.txt")
-        
+
         return Response(
             content=content.encode('utf-8'),
             media_type="application/octet-stream",
@@ -171,10 +198,10 @@ async def download_file(file_id: str):
 )
 async def delete_file(file_id: str):
     logger.info(f"🗑️ Deleting file: {file_id}")
-    
+
     try:
         deleted = await file_service.delete_file(file_id)
-        
+
         return FileDeleteResponse(
             message="✅ Файл удалён, индекс обновлён",
             file_id=file_id,
@@ -195,10 +222,10 @@ async def delete_file(file_id: str):
 async def delete_all_files():
     """Удалить ВСЕ файлы"""
     logger.info(f"🗑️ Deleting ALL files")
-    
+
     try:
         deleted_count = await file_service.delete_all_files()
-        
+
         return FilesDeleteAllResponse(
             message=f"✅ Удалено файлов: {deleted_count}. Vector Store очищен.",
             user_id="all",
@@ -212,10 +239,10 @@ async def delete_all_files():
 async def get_vector_store():
     """Получить текущий Vector Store ID"""
     from app.services import yandex_service
-    
+
     vector_store_id = yandex_service.get_vector_store_id()
     db_id = await file_service.get_current_vector_store_id()
-    
+
     return {
         "current_vector_store_id": vector_store_id or None,
         "db_vector_store_id": db_id or None,
