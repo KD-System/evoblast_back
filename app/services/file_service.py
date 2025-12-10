@@ -3,6 +3,7 @@
 Фоновая индексация Vector Store
 """
 import asyncio
+import base64
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from fastapi import UploadFile
@@ -140,8 +141,12 @@ async def upload_files(
 
             file_type = get_file_extension(file.filename)
 
+            # Кодируем бинарный контент в base64 для хранения в MongoDB
+            binary_content_b64 = base64.b64encode(content).decode('ascii')
+
+            # Для текстовых файлов сохраняем также текст (для превью)
             try:
-                text_content = content.decode('utf-8')
+                text_content = content.decode('utf-8')[:10000]
             except:
                 text_content = ""
 
@@ -155,7 +160,8 @@ async def upload_files(
                 file_type=file_type,
                 file_size=file_size,
                 yandex_file_id=yandex_file_id,
-                content=text_content[:10000],
+                content=text_content,
+                binary_content=binary_content_b64,
                 metadata=metadata or {},
                 status="uploaded"  # Ещё не в индексе
             )
@@ -203,6 +209,8 @@ async def get_all_files() -> List[Dict[str, Any]]:
             del f["_id"]
         if "content" in f:
             del f["content"]
+        if "binary_content" in f:
+            del f["binary_content"]
 
     return files
 
@@ -216,6 +224,8 @@ async def get_user_files(user_id: str) -> List[Dict[str, Any]]:
             del f["_id"]
         if "content" in f:
             del f["content"]
+        if "binary_content" in f:
+            del f["binary_content"]
 
     return files
 

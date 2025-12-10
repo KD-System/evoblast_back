@@ -256,14 +256,15 @@ async def create_file_record(
     file_size: int,
     yandex_file_id: str,
     content: str = "",
+    binary_content: str = "",
     metadata: Optional[Dict[str, Any]] = None,
     status: str = "ready"
 ) -> Dict[str, Any]:
     """Создать запись о файле"""
     db = get_database()
-    
+
     now = datetime.utcnow()
-    
+
     document = {
         "file_id": str(uuid_lib.uuid4()),
         "user_id": user_id,
@@ -275,12 +276,13 @@ async def create_file_record(
         "metadata": metadata or {},
         "created_at": now,
         "updated_at": now,
-        "content": content
+        "content": content,
+        "binary_content": binary_content
     }
-    
+
     await db.files.insert_one(document)
     logger.info(f"✅ Created file record: {filename}")
-    
+
     return document
 
 
