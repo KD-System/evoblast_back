@@ -217,6 +217,32 @@ def _delete_file_from_yandex_sync(file_id: str) -> bool:
         return False
 
 
+def _download_file_from_yandex_sync(file_id: str) -> bytes:
+    """Синхронное скачивание файла из Yandex Cloud"""
+    sdk = get_sdk()
+
+    try:
+        file = sdk.files.get(file_id)
+        # Скачиваем во временный файл и читаем
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        file.download(tmp_path)
+
+        with open(tmp_path, 'rb') as f:
+            content = f.read()
+
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        logger.info(f"📥 File downloaded: {file_id} ({len(content)} bytes)")
+        return content
+
+    except Exception as e:
+        logger.error(f"❌ Failed to download file {file_id}: {e}")
+        raise
+
+
 def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
     """Синхронное создание Vector Store"""
     sdk = get_sdk()
@@ -311,6 +337,11 @@ async def upload_file_to_yandex(file_content: bytes, filename: str) -> str:
 async def delete_file_from_yandex(file_id: str) -> bool:
     """Удалить файл из Yandex Cloud"""
     return await asyncio.to_thread(_delete_file_from_yandex_sync, file_id)
+
+
+async def download_file_from_yandex(file_id: str) -> bytes:
+    """Скачать файл из Yandex Cloud"""
+    return await asyncio.to_thread(_download_file_from_yandex_sync, file_id)
 
 
 async def create_vector_store(yandex_file_ids: List[str]) -> str:

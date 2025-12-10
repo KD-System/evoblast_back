@@ -174,19 +174,51 @@ async def get_file(file_id: str):
 
 @router.get("/download/{file_id}", summary="Скачать файл")
 async def download_file(file_id: str):
+    """Скачать файл из Yandex Cloud"""
+    from app.services import yandex_service
+    from urllib.parse import quote
+
     try:
-        file = await file_service.get_file(file_id)
-        content = file.get("content", "")
-        filename = file.get("filename", "file.txt")
+        # Получаем информацию о файле из БД
+        file_info = await file_service.get_file(file_id)
+        yandex_file_id = file_info.get("yandex_file_id")
+        filename = file_info.get("filename", "file")
+
+        if not yandex_file_id:
+            raise HTTPException(status_code=404, detail="Файл не найден в Yandex Cloud")
+
+        # Скачиваем файл из Yandex Cloud
+        content = await yandex_service.download_file_from_yandex(yandex_file_id)
+
+        # Определяем MIME-тип
+        file_type = file_info.get("file_type", "").lower()
+        mime_types = {
+            "pdf": "application/pdf",
+            "doc": "application/msword",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xls": "application/vnd.ms-excel",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "txt": "text/plain",
+            "md": "text/markdown",
+            "json": "application/json",
+            "csv": "text/csv",
+        }
+        media_type = mime_types.get(file_type, "application/octet-stream")
+
+        # Кодируем имя файла для заголовка (поддержка кириллицы)
+        encoded_filename = quote(filename)
 
         return Response(
-            content=content.encode('utf-8'),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            }
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.error(f"❌ Download error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
