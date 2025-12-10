@@ -327,6 +327,18 @@ async def delete_file_record(file_id: str) -> Optional[Dict[str, Any]]:
     return file
 
 
+async def update_file_status(file_id: str, status: str) -> bool:
+    """Обновить статус файла"""
+    db = get_database()
+
+    result = await db.files.update_one(
+        {"file_id": file_id},
+        {"$set": {"status": status, "updated_at": datetime.utcnow()}}
+    )
+
+    return result.modified_count > 0
+
+
 async def delete_all_user_files(user_id: str) -> List[Dict[str, Any]]:
     """Удалить все файлы пользователя и вернуть их"""
     db = get_database()
