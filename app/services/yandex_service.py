@@ -167,7 +167,7 @@ def _send_message_and_get_response_sync(
     run = assistant.run(thread)
     result = run.wait()
 
-    answer = result.text or "Извините, не смог сформировать ответ."
+    answer = (result.text or "Извините, не смог сформировать ответ.").replace("*", "")
 
     citations = []
     if hasattr(result, "citations") and result.citations:
