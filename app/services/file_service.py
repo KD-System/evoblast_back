@@ -17,15 +17,14 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', 'xlsx'}
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 MAX_FILES_PER_UPLOAD = 10
-MAX_CONTENT_PREVIEW = 5000  # Максимум символов для превью
 
 
 def extract_text_from_file(content: bytes, file_type: str) -> str:
-    """Извлечь текст из файла для превью"""
+    """Извлечь весь текст из файла"""
     try:
         # Текстовые файлы
         if file_type in ('txt', 'md', 'json', 'csv'):
-            return content.decode('utf-8', errors='ignore')[:MAX_CONTENT_PREVIEW]
+            return content.decode('utf-8', errors='ignore')
 
         # PDF
         if file_type == 'pdf':
@@ -33,9 +32,9 @@ def extract_text_from_file(content: bytes, file_type: str) -> str:
                 from PyPDF2 import PdfReader
                 reader = PdfReader(io.BytesIO(content))
                 text_parts = []
-                for page in reader.pages[:10]:  # Первые 10 страниц
+                for page in reader.pages:
                     text_parts.append(page.extract_text() or "")
-                return " ".join(text_parts)[:MAX_CONTENT_PREVIEW]
+                return "\n".join(text_parts)
             except Exception as e:
                 logger.warning(f"PDF extraction failed: {e}")
                 return ""
@@ -45,8 +44,8 @@ def extract_text_from_file(content: bytes, file_type: str) -> str:
             try:
                 from docx import Document
                 doc = Document(io.BytesIO(content))
-                text_parts = [p.text for p in doc.paragraphs[:100]]
-                return " ".join(text_parts)[:MAX_CONTENT_PREVIEW]
+                text_parts = [p.text for p in doc.paragraphs]
+                return "\n".join(text_parts)
             except Exception as e:
                 logger.warning(f"DOCX extraction failed: {e}")
                 return ""
@@ -57,12 +56,12 @@ def extract_text_from_file(content: bytes, file_type: str) -> str:
                 from openpyxl import load_workbook
                 wb = load_workbook(io.BytesIO(content), read_only=True)
                 text_parts = []
-                for sheet in wb.worksheets[:3]:  # Первые 3 листа
-                    for row in sheet.iter_rows(max_row=50, values_only=True):
+                for sheet in wb.worksheets:
+                    for row in sheet.iter_rows(values_only=True):
                         row_text = " | ".join(str(c) for c in row if c)
                         if row_text:
                             text_parts.append(row_text)
-                return "\n".join(text_parts)[:MAX_CONTENT_PREVIEW]
+                return "\n".join(text_parts)
             except Exception as e:
                 logger.warning(f"XLSX extraction failed: {e}")
                 return ""
