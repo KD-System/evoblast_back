@@ -3,7 +3,7 @@
 """
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 
 from app.models.schemas import (
@@ -59,7 +59,6 @@ def _to_file_info(f: dict) -> FileInfo:
     """
 )
 async def upload_files(
-    background_tasks: BackgroundTasks,
     user_id: str = Query(..., description="ID пользователя (кто загружает)"),
     files: List[UploadFile] = File(..., description="Файлы (макс. 10)")
 ):
@@ -72,9 +71,9 @@ async def upload_files(
             files=files
         )
 
-        # Запускаем индексацию в фоне
+        # Запускаем индексацию в фоне (отменяет предыдущую если есть)
         if uploaded_files:
-            background_tasks.add_task(file_service.rebuild_vector_store_background)
+            file_service.start_indexing_task()
 
         file_infos = [_to_file_info(f) for f in uploaded_files]
 
@@ -174,21 +173,20 @@ async def get_file(file_id: str):
 
 @router.get("/download/{file_id}", summary="Скачать файл")
 async def download_file(file_id: str):
-    """Скачать файл из MongoDB (base64)"""
-    import base64
+    """Скачать файл из GridFS"""
     from urllib.parse import quote
+    from app.database import mongodb
 
     try:
         # Получаем информацию о файле из БД
         file_info = await file_service.get_file(file_id)
         filename = file_info.get("filename", "file")
-        binary_content_b64 = file_info.get("binary_content")
 
-        if not binary_content_b64:
+        # Скачиваем из GridFS
+        content = await mongodb.gridfs_download(file_id)
+
+        if not content:
             raise HTTPException(status_code=404, detail="Контент файла не найден")
-
-        # Декодируем из base64
-        content = base64.b64decode(binary_content_b64)
 
         # Определяем MIME-тип
         file_type = file_info.get("file_type", "").lower()

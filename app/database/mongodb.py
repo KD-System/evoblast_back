@@ -4,7 +4,7 @@ MongoDB подключение и операции с базой данных
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorGridFSBucket
 import uuid as uuid_lib
 
 from app.config import get_settings
@@ -13,23 +13,25 @@ logger = logging.getLogger(__name__)
 
 _client: Optional[AsyncIOMotorClient] = None
 _database: Optional[AsyncIOMotorDatabase] = None
+_gridfs: Optional[AsyncIOMotorGridFSBucket] = None
 
 
 async def connect_to_mongodb():
     """Подключение к MongoDB"""
-    global _client, _database
-    
+    global _client, _database, _gridfs
+
     settings = get_settings()
-    
+
     try:
         _client = AsyncIOMotorClient(settings.MONGODB_URL)
         _database = _client[settings.MONGODB_DATABASE]
-        
+        _gridfs = AsyncIOMotorGridFSBucket(_database)
+
         await _client.admin.command('ping')
         logger.info(f"✅ Connected to MongoDB: {settings.MONGODB_DATABASE}")
-        
+
         await _create_indexes()
-        
+
     except Exception as e:
         logger.error(f"❌ Failed to connect to MongoDB: {e}")
         raise
@@ -361,10 +363,63 @@ async def delete_all_user_files(user_id: str) -> List[Dict[str, Any]]:
 async def delete_all_files() -> int:
     """Удалить ВСЕ файлы (пометить как deleted)"""
     db = get_database()
-    
+
     result = await db.files.update_many(
         {"status": {"$ne": "deleted"}},
         {"$set": {"status": "deleted", "updated_at": datetime.utcnow()}}
     )
-    
+
     return result.modified_count
+
+
+# ==========================================
+# GridFS Operations (для больших файлов)
+# ==========================================
+
+def get_gridfs() -> AsyncIOMotorGridFSBucket:
+    """Получить GridFS bucket"""
+    if _gridfs is None:
+        raise RuntimeError("GridFS not initialized")
+    return _gridfs
+
+
+async def gridfs_upload(file_id: str, filename: str, content: bytes) -> str:
+    """Загрузить файл в GridFS"""
+    fs = get_gridfs()
+    grid_id = await fs.upload_from_stream(
+        filename,
+        content,
+        metadata={"file_id": file_id}
+    )
+    logger.info(f"✅ GridFS upload: {filename} -> {grid_id}")
+    return str(grid_id)
+
+
+async def gridfs_download(file_id: str) -> Optional[bytes]:
+    """Скачать файл из GridFS по file_id"""
+    fs = get_gridfs()
+    db = get_database()
+
+    # Ищем файл по metadata.file_id
+    file_doc = await db.fs.files.find_one({"metadata.file_id": file_id})
+    if not file_doc:
+        return None
+
+    # Скачиваем
+    grid_out = await fs.open_download_stream(file_doc["_id"])
+    content = await grid_out.read()
+    return content
+
+
+async def gridfs_delete(file_id: str) -> bool:
+    """Удалить файл из GridFS по file_id"""
+    fs = get_gridfs()
+    db = get_database()
+
+    file_doc = await db.fs.files.find_one({"metadata.file_id": file_id})
+    if not file_doc:
+        return False
+
+    await fs.delete(file_doc["_id"])
+    logger.info(f"🗑️ GridFS deleted: {file_id}")
+    return True

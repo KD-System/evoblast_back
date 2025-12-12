@@ -18,6 +18,9 @@ ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', '
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 MAX_FILES_PER_UPLOAD = 10
 
+# Текущая задача индексации (для отмены)
+_current_indexing_task: Optional[asyncio.Task] = None
+
 
 def extract_text_from_file(content: bytes, file_type: str) -> str:
     """Извлечь весь текст из файла"""
@@ -164,9 +167,27 @@ async def rebuild_vector_store_background():
         _set_indexing_status(False, "completed", files_count)
         logger.info(f"✅ Background indexing completed for {files_count} files")
 
+    except asyncio.CancelledError:
+        logger.info("⚠️ Indexing task cancelled - new upload detected")
+        _set_indexing_status(False, "cancelled", 0)
+        raise
     except Exception as e:
         logger.error(f"❌ Background indexing failed: {e}")
         _set_indexing_status(False, f"error: {str(e)}", 0)
+
+
+def start_indexing_task():
+    """Запустить задачу индексации, отменив предыдущую если есть"""
+    global _current_indexing_task
+
+    # Отменяем предыдущую задачу если она ещё выполняется
+    if _current_indexing_task and not _current_indexing_task.done():
+        logger.info("🔄 Cancelling previous indexing task...")
+        _current_indexing_task.cancel()
+
+    # Создаём новую задачу
+    _current_indexing_task = asyncio.create_task(rebuild_vector_store_background())
+    return _current_indexing_task
 
 
 async def upload_files(
@@ -199,9 +220,6 @@ async def upload_files(
 
             file_type = get_file_extension(file.filename)
 
-            # Кодируем бинарный контент в base64 для хранения в MongoDB
-            binary_content_b64 = base64.b64encode(content).decode('ascii')
-
             # Извлекаем текст для превью (работает с PDF, DOCX, XLSX и текстовыми файлами)
             text_content = extract_text_from_file(content, file_type)
 
@@ -216,10 +234,13 @@ async def upload_files(
                 file_size=file_size,
                 yandex_file_id=yandex_file_id,
                 content=text_content,
-                binary_content=binary_content_b64,
+                binary_content="",  # Больше не храним в документе
                 metadata=metadata or {},
                 status="uploaded"  # Ещё не в индексе
             )
+
+            # Сохраняем бинарный контент в GridFS (без лимита размера)
+            await mongodb.gridfs_upload(file_record["file_id"], file.filename, content)
 
             uploaded_files.append(file_record)
             logger.info(f"✅ File uploaded: {file.filename}")
@@ -305,8 +326,12 @@ async def delete_file(file_id: str) -> bool:
     if not file:
         raise ValueError(f"Файл не найден: {file_id}")
 
+    # Удаляем из Yandex Cloud
     if file.get("yandex_file_id"):
         await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
+
+    # Удаляем из GridFS
+    await mongodb.gridfs_delete(file_id)
 
     try:
         await _rebuild_vector_store()
@@ -321,13 +346,18 @@ async def delete_all_files() -> int:
     """Удалить ВСЕ файлы и очистить Vector Store"""
     files = await mongodb.get_all_active_files()
 
-    # Удаляем из Yandex Cloud
+    # Удаляем из Yandex Cloud и GridFS
     for file in files:
         if file.get("yandex_file_id"):
             try:
                 await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
             except:
                 pass
+        # Удаляем из GridFS
+        try:
+            await mongodb.gridfs_delete(file["file_id"])
+        except:
+            pass
 
     # Помечаем все как удалённые в MongoDB
     deleted_count = await mongodb.delete_all_files()
