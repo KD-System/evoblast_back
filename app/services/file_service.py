@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', 'xlsx'}
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 MAX_FILES_PER_UPLOAD = 10
+MAX_BINARY_STORAGE = 12 * 1024 * 1024  # 12 MB - лимит для хранения в MongoDB (BSON limit 16MB)
+
+# Текущая задача индексации (для отмены)
+_current_indexing_task: Optional[asyncio.Task] = None
 
 
 def extract_text_from_file(content: bytes, file_type: str) -> str:
@@ -164,9 +168,27 @@ async def rebuild_vector_store_background():
         _set_indexing_status(False, "completed", files_count)
         logger.info(f"✅ Background indexing completed for {files_count} files")
 
+    except asyncio.CancelledError:
+        logger.info("⚠️ Indexing task cancelled - new upload detected")
+        _set_indexing_status(False, "cancelled", 0)
+        raise
     except Exception as e:
         logger.error(f"❌ Background indexing failed: {e}")
         _set_indexing_status(False, f"error: {str(e)}", 0)
+
+
+def start_indexing_task():
+    """Запустить задачу индексации, отменив предыдущую если есть"""
+    global _current_indexing_task
+
+    # Отменяем предыдущую задачу если она ещё выполняется
+    if _current_indexing_task and not _current_indexing_task.done():
+        logger.info("🔄 Cancelling previous indexing task...")
+        _current_indexing_task.cancel()
+
+    # Создаём новую задачу
+    _current_indexing_task = asyncio.create_task(rebuild_vector_store_background())
+    return _current_indexing_task
 
 
 async def upload_files(
@@ -199,8 +221,12 @@ async def upload_files(
 
             file_type = get_file_extension(file.filename)
 
-            # Кодируем бинарный контент в base64 для хранения в MongoDB
-            binary_content_b64 = base64.b64encode(content).decode('ascii')
+            # Кодируем бинарный контент в base64 только для файлов < 12MB (BSON лимит)
+            if file_size <= MAX_BINARY_STORAGE:
+                binary_content_b64 = base64.b64encode(content).decode('ascii')
+            else:
+                binary_content_b64 = ""  # Файл слишком большой для MongoDB
+                logger.warning(f"⚠️ File {file.filename} too large for MongoDB storage ({file_size} bytes)")
 
             # Извлекаем текст для превью (работает с PDF, DOCX, XLSX и текстовыми файлами)
             text_content = extract_text_from_file(content, file_type)

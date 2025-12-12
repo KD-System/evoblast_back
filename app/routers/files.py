@@ -3,7 +3,7 @@
 """
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 
 from app.models.schemas import (
@@ -59,7 +59,6 @@ def _to_file_info(f: dict) -> FileInfo:
     """
 )
 async def upload_files(
-    background_tasks: BackgroundTasks,
     user_id: str = Query(..., description="ID пользователя (кто загружает)"),
     files: List[UploadFile] = File(..., description="Файлы (макс. 10)")
 ):
@@ -72,9 +71,9 @@ async def upload_files(
             files=files
         )
 
-        # Запускаем индексацию в фоне
+        # Запускаем индексацию в фоне (отменяет предыдущую если есть)
         if uploaded_files:
-            background_tasks.add_task(file_service.rebuild_vector_store_background)
+            file_service.start_indexing_task()
 
         file_infos = [_to_file_info(f) for f in uploaded_files]
 
