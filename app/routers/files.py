@@ -173,21 +173,20 @@ async def get_file(file_id: str):
 
 @router.get("/download/{file_id}", summary="Скачать файл")
 async def download_file(file_id: str):
-    """Скачать файл из MongoDB (base64)"""
-    import base64
+    """Скачать файл из GridFS"""
     from urllib.parse import quote
+    from app.database import mongodb
 
     try:
         # Получаем информацию о файле из БД
         file_info = await file_service.get_file(file_id)
         filename = file_info.get("filename", "file")
-        binary_content_b64 = file_info.get("binary_content")
 
-        if not binary_content_b64:
+        # Скачиваем из GridFS
+        content = await mongodb.gridfs_download(file_id)
+
+        if not content:
             raise HTTPException(status_code=404, detail="Контент файла не найден")
-
-        # Декодируем из base64
-        content = base64.b64decode(binary_content_b64)
 
         # Определяем MIME-тип
         file_type = file_info.get("file_type", "").lower()

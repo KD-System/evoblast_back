@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', 'xlsx'}
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 MAX_FILES_PER_UPLOAD = 10
-MAX_BINARY_STORAGE = 12 * 1024 * 1024  # 12 MB - лимит для хранения в MongoDB (BSON limit 16MB)
 
 # Текущая задача индексации (для отмены)
 _current_indexing_task: Optional[asyncio.Task] = None
@@ -221,13 +220,6 @@ async def upload_files(
 
             file_type = get_file_extension(file.filename)
 
-            # Кодируем бинарный контент в base64 только для файлов < 12MB (BSON лимит)
-            if file_size <= MAX_BINARY_STORAGE:
-                binary_content_b64 = base64.b64encode(content).decode('ascii')
-            else:
-                binary_content_b64 = ""  # Файл слишком большой для MongoDB
-                logger.warning(f"⚠️ File {file.filename} too large for MongoDB storage ({file_size} bytes)")
-
             # Извлекаем текст для превью (работает с PDF, DOCX, XLSX и текстовыми файлами)
             text_content = extract_text_from_file(content, file_type)
 
@@ -242,10 +234,13 @@ async def upload_files(
                 file_size=file_size,
                 yandex_file_id=yandex_file_id,
                 content=text_content,
-                binary_content=binary_content_b64,
+                binary_content="",  # Больше не храним в документе
                 metadata=metadata or {},
                 status="uploaded"  # Ещё не в индексе
             )
+
+            # Сохраняем бинарный контент в GridFS (без лимита размера)
+            await mongodb.gridfs_upload(file_record["file_id"], file.filename, content)
 
             uploaded_files.append(file_record)
             logger.info(f"✅ File uploaded: {file.filename}")
@@ -331,8 +326,12 @@ async def delete_file(file_id: str) -> bool:
     if not file:
         raise ValueError(f"Файл не найден: {file_id}")
 
+    # Удаляем из Yandex Cloud
     if file.get("yandex_file_id"):
         await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
+
+    # Удаляем из GridFS
+    await mongodb.gridfs_delete(file_id)
 
     try:
         await _rebuild_vector_store()
@@ -347,13 +346,18 @@ async def delete_all_files() -> int:
     """Удалить ВСЕ файлы и очистить Vector Store"""
     files = await mongodb.get_all_active_files()
 
-    # Удаляем из Yandex Cloud
+    # Удаляем из Yandex Cloud и GridFS
     for file in files:
         if file.get("yandex_file_id"):
             try:
                 await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
             except:
                 pass
+        # Удаляем из GridFS
+        try:
+            await mongodb.gridfs_delete(file["file_id"])
+        except:
+            pass
 
     # Помечаем все как удалённые в MongoDB
     deleted_count = await mongodb.delete_all_files()
