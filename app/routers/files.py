@@ -71,13 +71,14 @@ async def upload_files(
             files=files
         )
 
-        # Запускаем индексацию в фоне (отменяет предыдущую если есть)
-        if uploaded_files:
-            file_service.start_indexing_task()
+        # ОТКЛЮЧЕНО: автоиндексация при загрузке
+        # Для запуска индексации используйте POST /api/evoblast/reindex
+        # if uploaded_files:
+        #     file_service.start_indexing_task()
 
         file_infos = [_to_file_info(f) for f in uploaded_files]
 
-        message = f"✅ Загружено: {len(uploaded_files)}. ⏳ Индексация запущена в фоне."
+        message = f"✅ Загружено: {len(uploaded_files)}. ⚠️ Для индексации вызовите POST /reindex"
         if errors:
             message += f" ⚠️ Ошибки: {'; '.join(errors)}"
 
@@ -278,3 +279,45 @@ async def get_vector_store():
         "db_vector_store_id": db_id or None,
         "has_knowledge_base": bool(vector_store_id)
     }
+
+
+@router.post(
+    "/reindex",
+    summary="Запустить индексацию",
+    description="""
+    Ручной запуск индексации Vector Store.
+
+    Используйте после массовой загрузки файлов.
+    Индексация выполняется в фоне.
+    """
+)
+async def reindex():
+    """Запустить индексацию вручную"""
+    from app.database import mongodb
+
+    logger.info("🔄 Manual reindex triggered")
+
+    try:
+        # Получаем количество файлов
+        files = await file_service.get_all_files()
+        files_count = len(files)
+
+        if files_count == 0:
+            return {
+                "message": "⚠️ Нет файлов для индексации",
+                "files_count": 0,
+                "status": "skipped"
+            }
+
+        # Запускаем индексацию в фоне
+        file_service.start_indexing_task()
+
+        return {
+            "message": f"✅ Индексация запущена для {files_count} файлов",
+            "files_count": files_count,
+            "status": "started"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Reindex error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
