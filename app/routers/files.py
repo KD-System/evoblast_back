@@ -71,14 +71,13 @@ async def upload_files(
             files=files
         )
 
-        # ОТКЛЮЧЕНО: автоиндексация при загрузке
-        # Для запуска индексации используйте POST /api/evoblast/reindex
-        # if uploaded_files:
-        #     file_service.start_indexing_task()
+        # Запускаем индексацию в фоне (отменяет предыдущую если есть)
+        if uploaded_files:
+            file_service.start_indexing_task()
 
         file_infos = [_to_file_info(f) for f in uploaded_files]
 
-        message = f"✅ Загружено: {len(uploaded_files)}. ⚠️ Для индексации вызовите POST /reindex"
+        message = f"✅ Загружено: {len(uploaded_files)}. ⏳ Индексация запущена в фоне."
         if errors:
             message += f" ⚠️ Ошибки: {'; '.join(errors)}"
 
