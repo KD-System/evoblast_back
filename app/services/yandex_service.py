@@ -244,9 +244,7 @@ def _download_file_from_yandex_sync(file_id: str) -> bytes:
 
 
 def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
-    """Синхронное создание Vector Store с таймаутом и логированием прогресса"""
-    import time
-
+    """Синхронное создание Vector Store с таймаутом"""
     sdk = get_sdk()
     settings = get_settings()
 
@@ -284,38 +282,14 @@ def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
             expiration_policy="static",
         )
 
-        logger.info(f"📋 Operation started: {operation.id}")
+        logger.info(f"📋 Operation started: {operation.id}, waiting up to 5 min...")
 
-        # Ручной polling с логированием прогресса (таймаут 5 минут)
-        timeout_seconds = 300
-        poll_interval = 10
-        elapsed = 0
-
-        while elapsed < timeout_seconds:
-            if operation.done:
-                break
-
-            logger.info(f"⏳ Vector Store indexing... ({elapsed}s / {timeout_seconds}s)")
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-
-        if not operation.done:
-            logger.error(f"❌ Vector Store creation timed out after {timeout_seconds}s")
-            raise TimeoutError(f"Vector Store creation timed out after {timeout_seconds} seconds")
-
-        # Получаем результат
-        search_index = operation.result
-
-        if search_index is None:
-            # Попробуем получить ошибку
-            logger.error(f"❌ Vector Store creation failed: operation completed but no result")
-            raise RuntimeError("Vector Store creation failed - no result returned")
+        # Используем встроенный wait() с таймаутом 5 минут
+        search_index = operation.wait(timeout=300)
 
         logger.info(f"✅ Vector Store created: {search_index.id}")
         return search_index.id
 
-    except TimeoutError:
-        raise
     except Exception as e:
         logger.error(f"❌ Vector Store creation error: {e}", exc_info=True)
         raise
