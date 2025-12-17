@@ -244,7 +244,9 @@ def _download_file_from_yandex_sync(file_id: str) -> bytes:
 
 
 def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
-    """Синхронное создание Vector Store"""
+    """Синхронное создание Vector Store с таймаутом и логированием прогресса"""
+    import time
+
     sdk = get_sdk()
     settings = get_settings()
 
@@ -266,25 +268,57 @@ def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
 
     logger.info(f"🔄 Creating Vector Store: {index_name} with {len(files)} files...")
 
-    operation = sdk.search_indexes.create_deferred(
-        files=files,
-        name=index_name,
-        index_type=VectorSearchIndexType(
-            doc_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-doc/latest",
-            query_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-query/latest",
-            chunking_strategy=StaticIndexChunkingStrategy(
-                max_chunk_size_tokens=700,
-                chunk_overlap_tokens=300,
+    try:
+        operation = sdk.search_indexes.create_deferred(
+            files=files,
+            name=index_name,
+            index_type=VectorSearchIndexType(
+                doc_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-doc/latest",
+                query_embedder_uri=f"emb://{settings.YANDEX_FOLDER_ID}/text-search-query/latest",
+                chunking_strategy=StaticIndexChunkingStrategy(
+                    max_chunk_size_tokens=700,
+                    chunk_overlap_tokens=300,
+                ),
             ),
-        ),
-        ttl_days=365,
-        expiration_policy="static",
-    )
+            ttl_days=365,
+            expiration_policy="static",
+        )
 
-    search_index = operation.wait()
+        logger.info(f"📋 Operation started: {operation.id}")
 
-    logger.info(f"✅ Vector Store created: {search_index.id}")
-    return search_index.id
+        # Ручной polling с логированием прогресса (таймаут 5 минут)
+        timeout_seconds = 300
+        poll_interval = 10
+        elapsed = 0
+
+        while elapsed < timeout_seconds:
+            if operation.done:
+                break
+
+            logger.info(f"⏳ Vector Store indexing... ({elapsed}s / {timeout_seconds}s)")
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        if not operation.done:
+            logger.error(f"❌ Vector Store creation timed out after {timeout_seconds}s")
+            raise TimeoutError(f"Vector Store creation timed out after {timeout_seconds} seconds")
+
+        # Получаем результат
+        search_index = operation.result
+
+        if search_index is None:
+            # Попробуем получить ошибку
+            logger.error(f"❌ Vector Store creation failed: operation completed but no result")
+            raise RuntimeError("Vector Store creation failed - no result returned")
+
+        logger.info(f"✅ Vector Store created: {search_index.id}")
+        return search_index.id
+
+    except TimeoutError:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Vector Store creation error: {e}", exc_info=True)
+        raise
 
 
 def _delete_vector_store_sync(index_id: str) -> bool:
