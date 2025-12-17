@@ -282,10 +282,10 @@ def _create_vector_store_sync(yandex_file_ids: List[str]) -> str:
             expiration_policy="static",
         )
 
-        logger.info(f"📋 Operation started: {operation.id}, waiting up to 5 min...")
+        logger.info(f"📋 Operation started: {operation.id}, waiting up to 60 min...")
 
-        # Используем встроенный wait() с таймаутом 5 минут
-        search_index = operation.wait(timeout=300)
+        # Используем встроенный wait() с таймаутом 60 минут (Yandex Cloud медленный)
+        search_index = operation.wait(timeout=3600)
 
         logger.info(f"✅ Vector Store created: {search_index.id}")
         return search_index.id
