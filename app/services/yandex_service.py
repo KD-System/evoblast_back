@@ -1,18 +1,17 @@
 """
-Сервис для работы с Yandex Cloud AI через OpenAI-совместимый API.
+Сервис для работы с Yandex Cloud AI.
 
-Использует фиксированный SEARCH_INDEX_ID для работы с базой знаний.
-Файлы добавляются/удаляются из индекса без его пересоздания.
+Ручной RAG: vector_stores.search + completion API.
+Отвечает ТОЛЬКО на основе базы знаний.
 """
 import asyncio
 import logging
 import mimetypes
 import os
-import tempfile
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
+import httpx
 from openai import OpenAI
-from yandex_cloud_ml_sdk import YCloudML
 
 from app.config import get_settings
 
@@ -20,7 +19,64 @@ logger = logging.getLogger(__name__)
 
 # Клиенты
 _openai_client: Optional[OpenAI] = None
-_yandex_sdk: Optional[YCloudML] = None
+
+# Приветствия и прощания
+GREETINGS = {"привет", "здравствуй", "здравствуйте", "добрый день", "доброе утро", "добрый вечер", "хай", "hello", "hi"}
+FAREWELLS = {"пока", "до свидания", "прощай", "bye", "goodbye"}
+THANKS = {"спасибо", "благодарю", "thanks", "thank you"}
+
+# Системный промпт для развёрнутых ответов
+SYSTEM_PROMPT = """Ты профессиональный ассистент-эксперт по базе знаний. Твоя задача — давать РАЗВЁРНУТЫЕ, СТРУКТУРИРОВАННЫЕ и ПОЛЕЗНЫЕ ответы на основе предоставленной базы знаний.
+
+ПРАВИЛА ОТВЕТА:
+
+1. ОБЪЁМ И СОДЕРЖАТЕЛЬНОСТЬ:
+   - Давай подробные, развёрнутые ответы (минимум 300-500 слов, если тема позволяет)
+   - Раскрывай тему полностью, не ограничивайся кратким пересказом
+   - Добавляй практические рекомендации, где уместно
+   - Выделяй ключевые моменты и риски
+
+2. СТРУКТУРА И ФОРМАТИРОВАНИЕ:
+   - Используй заголовки и подзаголовки для разделов
+   - Применяй нумерованные списки для последовательностей действий
+   - Применяй маркированные списки (•) для перечислений
+   - Разделяй текст на логические абзацы
+   - Оставляй пустые строки между разделами
+
+3. ФОРМАТ ОТВЕТА:
+
+   **Заголовок темы**
+
+   Вводный абзац с общим описанием.
+
+   **Подзаголовок 1**
+
+   Текст раздела с подробностями.
+
+   Ключевые аспекты:
+   • пункт 1
+   • пункт 2
+   • пункт 3
+
+   **Подзаголовок 2**
+
+   Порядок действий:
+   1. Первый шаг
+   2. Второй шаг
+   3. Третий шаг
+
+   **Рекомендации**
+
+   Практические советы по теме.
+
+4. ОГРАНИЧЕНИЯ:
+   - Отвечай ТОЛЬКО на основе базы знаний
+   - Если информации нет — честно скажи: "К сожалению, в моей базе знаний нет информации по этому вопросу."
+   - НЕ выдумывай факты
+
+БАЗА ЗНАНИЙ:
+
+"""
 
 
 def get_openai_client() -> OpenAI:
@@ -44,28 +100,6 @@ def get_openai_client() -> OpenAI:
         logger.info("✅ OpenAI-compatible client initialized for Yandex Cloud")
 
     return _openai_client
-
-
-def get_yandex_sdk() -> YCloudML:
-    """Получить Yandex Cloud ML SDK (для чатов и assistants)"""
-    global _yandex_sdk
-
-    if _yandex_sdk is None:
-        settings = get_settings()
-
-        if not settings.YANDEX_FOLDER_ID:
-            raise RuntimeError("YANDEX_FOLDER_ID not configured")
-
-        if not settings.YANDEX_API_KEY:
-            raise RuntimeError("YANDEX_API_KEY not configured")
-
-        _yandex_sdk = YCloudML(
-            folder_id=settings.YANDEX_FOLDER_ID,
-            auth=settings.YANDEX_API_KEY
-        )
-        logger.info("✅ Yandex Cloud ML SDK initialized")
-
-    return _yandex_sdk
 
 
 def is_configured() -> bool:
@@ -101,14 +135,260 @@ def _get_mime_type(filename: str) -> str:
 
 
 # ==========================================
+# Обработка приветствий
+# ==========================================
+
+def is_greeting(text: str) -> bool:
+    text_lower = text.lower().strip()
+    return text_lower in GREETINGS or any(g in text_lower for g in GREETINGS)
+
+
+def is_farewell(text: str) -> bool:
+    text_lower = text.lower().strip()
+    return text_lower in FAREWELLS or any(f in text_lower for f in FAREWELLS)
+
+
+def is_thanks(text: str) -> bool:
+    text_lower = text.lower().strip()
+    return text_lower in THANKS or any(t in text_lower for t in THANKS)
+
+
+def get_greeting_response(text: str) -> Optional[str]:
+    """Получить ответ на приветствие/прощание/благодарность"""
+    if is_greeting(text):
+        return "Здравствуйте! Я ассистент по базе знаний. Задайте мне вопрос по загруженным документам, и я дам вам развёрнутый структурированный ответ."
+    if is_farewell(text):
+        return "До свидания! Буду рад помочь снова."
+    if is_thanks(text):
+        return "Пожалуйста! Если есть ещё вопросы по базе знаний — спрашивайте."
+    return None
+
+
+# ==========================================
+# RAG Pipeline (синхронные версии)
+# ==========================================
+
+def _search_index_sync(query: str, max_results: int = 10) -> List[str]:
+    """Поиск по vector store"""
+    client = get_openai_client()
+    settings = get_settings()
+    index_id = settings.SEARCH_INDEX_ID
+
+    if not index_id:
+        logger.warning("⚠️ SEARCH_INDEX_ID not configured")
+        return []
+
+    try:
+        results = client.vector_stores.search(index_id, query=query)
+        chunks = []
+
+        for r in results:
+            if hasattr(r, 'content'):
+                for content in r.content:
+                    if hasattr(content, 'text') and content.text:
+                        chunks.append(content.text)
+            elif hasattr(r, 'text') and r.text:
+                chunks.append(r.text)
+
+        logger.info(f"🔍 Search found {len(chunks)} chunks")
+        return chunks[:max_results]
+
+    except Exception as e:
+        logger.error(f"❌ Search error: {e}")
+        return []
+
+
+def _check_relevance_sync(question: str, chunks: List[str]) -> bool:
+    """Проверяет релевантность через LLM"""
+    if not chunks:
+        return False
+
+    settings = get_settings()
+
+    check_prompt = f"""Оцени, содержит ли текст из базы знаний информацию для ответа на вопрос.
+
+ВОПРОС: {question}
+
+ТЕКСТ ИЗ БАЗЫ:
+{chunks[0][:500]}
+
+Ответь ОДНИМ словом: ДА или НЕТ"""
+
+    try:
+        response = httpx.post(
+            "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+            headers={
+                "Authorization": f"Api-Key {settings.YANDEX_API_KEY}",
+                "x-folder-id": settings.YANDEX_FOLDER_ID,
+                "Content-Type": "application/json"
+            },
+            json={
+                "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/yandexgpt-lite/latest",
+                "completionOptions": {
+                    "stream": False,
+                    "temperature": 0.0,
+                    "maxTokens": 10
+                },
+                "messages": [{"role": "user", "text": check_prompt}]
+            },
+            timeout=30.0
+        )
+
+        if response.status_code == 200:
+            answer = response.json()["result"]["alternatives"][0]["message"]["text"].strip().upper()
+            is_relevant = "ДА" in answer
+            logger.info(f"🎯 Relevance check: {is_relevant}")
+            return is_relevant
+
+    except Exception as e:
+        logger.warning(f"⚠️ Relevance check failed: {e}")
+
+    return True  # По умолчанию считаем релевантным
+
+
+def _generate_answer_sync(question: str, context: str, history: List[Dict[str, str]]) -> str:
+    """Генерация развёрнутого ответа через REST API"""
+    settings = get_settings()
+
+    system_text = SYSTEM_PROMPT
+    if context:
+        system_text += context
+    else:
+        system_text += "(пусто)"
+
+    messages = [{"role": "system", "text": system_text}]
+
+    # Добавляем историю
+    for msg in history:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        messages.append({"role": role, "text": content})
+
+    # Добавляем текущий вопрос
+    messages.append({"role": "user", "text": question})
+
+    response = httpx.post(
+        "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+        headers={
+            "Authorization": f"Api-Key {settings.YANDEX_API_KEY}",
+            "x-folder-id": settings.YANDEX_FOLDER_ID,
+            "Content-Type": "application/json"
+        },
+        json={
+            "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/yandexgpt/latest",
+            "completionOptions": {
+                "stream": False,
+                "temperature": 0.3,
+                "maxTokens": 8000
+            },
+            "messages": messages
+        },
+        timeout=120.0
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"API error {response.status_code}: {response.text}")
+
+    data = response.json()
+    answer = data["result"]["alternatives"][0]["message"]["text"]
+    logger.info(f"📥 Generated answer: {len(answer)} chars")
+    return answer
+
+
+def _rag_pipeline_sync(question: str, history: List[Dict[str, str]]) -> Tuple[str, List[str]]:
+    """
+    Полный RAG pipeline.
+    Возвращает (ответ, список использованных chunks)
+    """
+    # 1. Проверка на приветствие
+    greeting_response = get_greeting_response(question)
+    if greeting_response:
+        return greeting_response, []
+
+    # 2. Поиск по базе знаний
+    chunks = _search_index_sync(question, max_results=10)
+
+    if not chunks:
+        return "К сожалению, в моей базе знаний нет информации по этому вопросу.", []
+
+    # 3. Проверка релевантности
+    if not _check_relevance_sync(question, chunks):
+        return "К сожалению, в моей базе знаний нет информации по этому вопросу.", []
+
+    # 4. Формируем контекст
+    context = "\n\n---\n\n".join(chunks)
+
+    # 5. Генерация ответа
+    answer = _generate_answer_sync(question, context, history)
+
+    return answer, chunks
+
+
+def _generate_chat_name_sync(message: str) -> str:
+    """Генерация названия чата через LLM"""
+    settings = get_settings()
+
+    prompt = f"""Сгенерируй короткое и красивое название для чата на основе сообщения пользователя.
+
+Правила:
+- Название должно быть на русском языке
+- Максимум 5-6 слов
+- Без кавычек и лишних символов
+- Отражать суть вопроса/темы
+- Начинаться с маленькой буквы
+
+Примеры:
+- "как выращивать огурцы" → выращивание огурцов
+- "что такое любовь" → рассуждение о любви
+- "помоги написать код на python" → помощь с кодом на Python
+- "привет" → приветствие
+
+Сообщение пользователя: {message}
+
+Название чата:"""
+
+    try:
+        response = httpx.post(
+            "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+            headers={
+                "Authorization": f"Api-Key {settings.YANDEX_API_KEY}",
+                "x-folder-id": settings.YANDEX_FOLDER_ID,
+                "Content-Type": "application/json"
+            },
+            json={
+                "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/yandexgpt-lite/latest",
+                "completionOptions": {
+                    "stream": False,
+                    "temperature": 0.3,
+                    "maxTokens": 50
+                },
+                "messages": [{"role": "user", "text": prompt}]
+            },
+            timeout=30.0
+        )
+
+        if response.status_code == 200:
+            chat_name = response.json()["result"]["alternatives"][0]["message"]["text"].strip()
+            chat_name = chat_name.strip('"\'«»')
+
+            if not chat_name or len(chat_name) > 100:
+                chat_name = message[:50] if len(message) > 50 else message
+
+            logger.info(f"✅ Generated chat name: {chat_name}")
+            return chat_name
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to generate chat name: {e}")
+
+    return f"Чат: {message[:30]}..." if len(message) > 30 else f"Чат: {message}"
+
+
+# ==========================================
 # Файловые операции (OpenAI-совместимый API)
 # ==========================================
 
 def _upload_file_and_add_to_index_sync(file_content: bytes, filename: str) -> str:
-    """
-    Синхронная загрузка файла в storage и добавление в индекс.
-    Возвращает file_id загруженного файла.
-    """
+    """Загрузка файла в storage и добавление в индекс"""
     client = get_openai_client()
     settings = get_settings()
     index_id = settings.SEARCH_INDEX_ID
@@ -138,9 +418,7 @@ def _upload_file_and_add_to_index_sync(file_content: bytes, filename: str) -> st
 
 
 def _delete_file_from_index_sync(file_id: str) -> bool:
-    """
-    Синхронное удаление файла из индекса и storage.
-    """
+    """Удаление файла из индекса и storage"""
     client = get_openai_client()
     settings = get_settings()
     index_id = settings.SEARCH_INDEX_ID
@@ -148,17 +426,12 @@ def _delete_file_from_index_sync(file_id: str) -> bool:
     if not index_id:
         logger.warning("⚠️ SEARCH_INDEX_ID not configured, skipping index removal")
     else:
-        # 1. Удаляем из vector store
         try:
-            client.vector_stores.files.delete(
-                file_id,
-                vector_store_id=index_id
-            )
+            client.vector_stores.files.delete(file_id, vector_store_id=index_id)
             logger.info(f"🗑️ File removed from index: {file_id}")
         except Exception as e:
             logger.warning(f"⚠️ Failed to remove file from index: {e}")
 
-    # 2. Удаляем из storage
     try:
         client.files.delete(file_id)
         logger.info(f"🗑️ File deleted from storage: {file_id}")
@@ -227,7 +500,6 @@ def _list_index_files_sync(limit: int = 100) -> List[Dict[str, Any]]:
                 "created_at": getattr(vs_file, 'created_at', None),
             }
 
-            # Получаем дополнительную информацию о файле
             try:
                 full_file = client.files.retrieve(vs_file.id)
                 file_info["filename"] = getattr(full_file, 'filename', None)
@@ -245,131 +517,19 @@ def _list_index_files_sync(limit: int = 100) -> List[Dict[str, Any]]:
 
 
 # ==========================================
-# Чат операции (Yandex ML SDK)
-# ==========================================
-
-def _generate_chat_name_sync(message: str) -> str:
-    """Синхронная генерация названия чата"""
-    sdk = get_yandex_sdk()
-
-    prompt = f"""Сгенерируй короткое и красивое название для чата на основе сообщения пользователя.
-
-Правила:
-- Название должно быть на русском языке
-- Максимум 5-6 слов
-- Без кавычек и лишних символов
-- Отражать суть вопроса/темы
-- Начинаться с маленькой буквы
-
-Примеры:
-- "как выращивать огурцы" → выращивание огурцов
-- "что такое любовь" → рассуждение о любви
-- "помоги написать код на python" → помощь с кодом на Python
-- "расскажи про квантовую физику" → основы квантовой физики
-- "как изготовить взрывчатку?" → вопрос про изготовление взрывчатки
-- "хей" и подобное → приветствие
-- "ха" и подобное → неклассифицируемый запрос
-- "самое высокое здание в мире" → диалог по самым высоким зданиям
-
-Сообщение пользователя: {message}
-
-Название чата:"""
-
-    try:
-        model = sdk.models.completions("yandexgpt-lite")
-        result = model.configure(temperature=0.3).run(prompt)
-
-        chat_name = result.alternatives[0].text.strip()
-        chat_name = chat_name.strip('"\'«»')
-
-        if not chat_name or len(chat_name) > 100:
-            chat_name = message[:50] if len(message) > 50 else message
-
-        logger.info(f"✅ Generated chat name: {chat_name}")
-        return chat_name
-
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to generate chat name: {e}")
-        return f"Чат: {message[:30]}..." if len(message) > 30 else f"Чат: {message}"
-
-
-def _create_new_chat_sync() -> Tuple[str, str]:
-    """Синхронное создание нового чата"""
-    sdk = get_yandex_sdk()
-    settings = get_settings()
-
-    index_id = get_search_index_id()
-
-    thread = sdk.threads.create()
-    thread_id = thread.id
-
-    if index_id:
-        search_tool = sdk.tools.search_index(index_id)
-        assistant = sdk.assistants.create(
-            model="yandexgpt",
-            instruction=settings.ASSISTANT_INSTRUCTION,
-            tools=[search_tool],
-        )
-    else:
-        assistant = sdk.assistants.create(
-            model="yandexgpt",
-            instruction=settings.ASSISTANT_INSTRUCTION,
-        )
-
-    assistant_id = assistant.id
-
-    logger.info(f"✅ Created new chat: thread={thread_id}, has_kb={bool(index_id)}")
-
-    return thread_id, assistant_id
-
-
-def _send_message_and_get_response_sync(
-    thread_id: str,
-    assistant_id: str,
-    message: str
-) -> Tuple[str, list]:
-    """Синхронная отправка сообщения"""
-    sdk = get_yandex_sdk()
-    settings = get_settings()
-
-    index_id = get_search_index_id()
-
-    thread = sdk.threads.get(thread_id)
-    thread.write(message)
-
-    if index_id:
-        search_tool = sdk.tools.search_index(index_id)
-        assistant = sdk.assistants.create(
-            model="yandexgpt",
-            instruction=settings.ASSISTANT_INSTRUCTION,
-            tools=[search_tool],
-        )
-    else:
-        assistant = sdk.assistants.create(
-            model="yandexgpt",
-            instruction=settings.ASSISTANT_INSTRUCTION,
-        )
-
-    run = assistant.run(thread)
-    result = run.wait()
-
-    answer = (result.text or "Извините, не смог сформировать ответ.").replace("*", "")
-
-    citations = []
-    if hasattr(result, "citations") and result.citations:
-        for citation in result.citations:
-            for source in citation.sources:
-                if hasattr(source, "file") and hasattr(source.file, "id"):
-                    citations.append({"file_id": source.file.id, "type": "file"})
-
-    logger.info(f"📥 Got response ({len(answer)} chars), kb={bool(index_id)}")
-
-    return answer, citations
-
-
-# ==========================================
 # Асинхронные обёртки (публичный API)
 # ==========================================
+
+# RAG операции
+async def rag_pipeline(question: str, history: List[Dict[str, str]]) -> Tuple[str, List[str]]:
+    """Полный RAG pipeline: поиск + проверка релевантности + генерация"""
+    return await asyncio.to_thread(_rag_pipeline_sync, question, history)
+
+
+async def generate_chat_name(message: str) -> str:
+    """Генерирует красивое название чата"""
+    return await asyncio.to_thread(_generate_chat_name_sync, message)
+
 
 # Файловые операции
 async def upload_file_to_index(file_content: bytes, filename: str) -> str:
@@ -390,28 +550,3 @@ async def get_index_info() -> Dict[str, Any]:
 async def list_index_files(limit: int = 100) -> List[Dict[str, Any]]:
     """Получить список файлов в индексе"""
     return await asyncio.to_thread(_list_index_files_sync, limit)
-
-
-# Чат операции
-async def generate_chat_name(message: str) -> str:
-    """Генерирует красивое название чата на основе первого сообщения"""
-    return await asyncio.to_thread(_generate_chat_name_sync, message)
-
-
-async def create_new_chat() -> Tuple[str, str]:
-    """Создать новый чат (thread + assistant)"""
-    return await asyncio.to_thread(_create_new_chat_sync)
-
-
-async def send_message_and_get_response(
-    thread_id: str,
-    assistant_id: str,
-    message: str
-) -> Tuple[str, list]:
-    """Отправить сообщение и получить ответ"""
-    return await asyncio.to_thread(
-        _send_message_and_get_response_sync,
-        thread_id,
-        assistant_id,
-        message
-    )
