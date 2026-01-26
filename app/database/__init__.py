@@ -3,9 +3,6 @@ from .mongodb import (
     close_mongodb_connection,
     get_database,
     is_connected,
-    # Settings
-    get_current_vector_store_id,
-    set_current_vector_store_id,
     # Chat threads
     create_chat_thread,
     get_chat_thread,
