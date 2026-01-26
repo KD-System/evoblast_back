@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     # Yandex Cloud
     YANDEX_FOLDER_ID: str = ""
     YANDEX_API_KEY: str = ""
-    VECTOR_STORE_ID: str = ""
+    SEARCH_INDEX_ID: str = ""  # Фиксированный ID поискового индекса
+    YANDEX_API_BASE_URL: str = "https://rest-assistant.api.cloud.yandex.net/v1"
     
     # Assistant settings
     ASSISTANT_INSTRUCTION: str = """Ты - полезный помощник компании.

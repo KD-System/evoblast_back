@@ -1,9 +1,9 @@
 """
-Сервис для работы с файлами
-Фоновая индексация Vector Store
+Сервис для работы с файлами.
+
+Файлы загружаются напрямую в фиксированный индекс (SEARCH_INDEX_ID).
+Индекс НЕ пересоздаётся при каждом изменении.
 """
-import asyncio
-import base64
 import io
 import logging
 from typing import Dict, Any, List, Tuple, Optional
@@ -17,9 +17,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx', 'md', 'json', 'csv', 'xls', 'xlsx'}
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 MAX_FILES_PER_UPLOAD = 10
-
-# Текущая задача индексации (для отмены)
-_current_indexing_task: Optional[asyncio.Task] = None
 
 
 def extract_text_from_file(content: bytes, file_type: str) -> str:
@@ -78,28 +75,6 @@ def extract_text_from_file(content: bytes, file_type: str) -> str:
         logger.error(f"Text extraction error: {e}")
         return ""
 
-# Статус индексации
-_indexing_status: Dict[str, Any] = {
-    "is_indexing": False,
-    "message": "idle",
-    "files_count": 0
-}
-
-
-def get_indexing_status() -> Dict[str, Any]:
-    """Получить текущий статус индексации"""
-    return _indexing_status.copy()
-
-
-def _set_indexing_status(is_indexing: bool, message: str, files_count: int = 0):
-    """Установить статус индексации"""
-    global _indexing_status
-    _indexing_status = {
-        "is_indexing": is_indexing,
-        "message": message,
-        "files_count": files_count
-    }
-
 
 def get_file_extension(filename: str) -> str:
     if '.' in filename:
@@ -111,93 +86,14 @@ def is_allowed_file(filename: str) -> bool:
     return get_file_extension(filename) in ALLOWED_EXTENSIONS
 
 
-async def _rebuild_vector_store() -> Optional[str]:
-    """
-    Пересоздать Vector Store со всеми активными файлами.
-    Если файлов нет — удаляет Vector Store и сбрасывает ID.
-    """
-    old_vector_store_id = await mongodb.get_current_vector_store_id()
-
-    # Получаем ВСЕ активные файлы (без фильтра по user_id)
-    files = await mongodb.get_all_active_files()
-
-    # Собираем Yandex file IDs
-    yandex_file_ids = [f["yandex_file_id"] for f in files if f.get("yandex_file_id")]
-
-    # Если файлов нет — удаляем старый Vector Store и сбрасываем ID
-    if not yandex_file_ids:
-        logger.warning("⚠️ No files to index, clearing Vector Store")
-
-        if old_vector_store_id:
-            await yandex_service.delete_vector_store(old_vector_store_id)
-
-        await mongodb.set_current_vector_store_id("")
-        yandex_service.set_vector_store_id("")
-
-        return None
-
-    # Создаём новый Vector Store
-    new_vector_store_id = await yandex_service.create_vector_store(yandex_file_ids)
-
-    # Сохраняем в MongoDB
-    await mongodb.set_current_vector_store_id(new_vector_store_id)
-
-    # Обновляем кэш
-    yandex_service.set_vector_store_id(new_vector_store_id)
-
-    # Удаляем старый Vector Store
-    if old_vector_store_id and old_vector_store_id != new_vector_store_id:
-        await yandex_service.delete_vector_store(old_vector_store_id)
-
-    logger.info(f"✅ Vector Store rebuilt: {new_vector_store_id}")
-    return new_vector_store_id
-
-
-async def rebuild_vector_store_background():
-    """Фоновая задача для пересоздания Vector Store"""
-    try:
-        files = await mongodb.get_all_active_files()
-        files_count = len(files)
-
-        _set_indexing_status(True, "indexing", files_count)
-        logger.info(f"🔄 Starting background indexing for {files_count} files...")
-
-        await _rebuild_vector_store()
-
-        _set_indexing_status(False, "completed", files_count)
-        logger.info(f"✅ Background indexing completed for {files_count} files")
-
-    except asyncio.CancelledError:
-        logger.info("⚠️ Indexing task cancelled - new upload detected")
-        _set_indexing_status(False, "cancelled", 0)
-        raise
-    except Exception as e:
-        logger.error(f"❌ Background indexing failed: {e}")
-        _set_indexing_status(False, f"error: {str(e)}", 0)
-
-
-def start_indexing_task():
-    """Запустить задачу индексации, отменив предыдущую если есть"""
-    global _current_indexing_task
-
-    # Отменяем предыдущую задачу если она ещё выполняется
-    if _current_indexing_task and not _current_indexing_task.done():
-        logger.info("🔄 Cancelling previous indexing task...")
-        _current_indexing_task.cancel()
-
-    # Создаём новую задачу
-    _current_indexing_task = asyncio.create_task(rebuild_vector_store_background())
-    return _current_indexing_task
-
-
 async def upload_files(
     user_id: str,
     files: List[UploadFile],
     metadata: Dict[str, Any] = None
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    Загрузить файлы в Yandex Cloud.
-    Vector Store создаётся отдельно через фоновую задачу.
+    Загрузить файлы в Yandex Cloud и добавить в индекс.
+    Файлы добавляются в существующий индекс (SEARCH_INDEX_ID).
     """
     if len(files) > MAX_FILES_PER_UPLOAD:
         raise ValueError(f"Максимум {MAX_FILES_PER_UPLOAD} файлов за раз")
@@ -220,13 +116,13 @@ async def upload_files(
 
             file_type = get_file_extension(file.filename)
 
-            # Извлекаем текст для превью (работает с PDF, DOCX, XLSX и текстовыми файлами)
+            # Извлекаем текст для превью
             text_content = extract_text_from_file(content, file_type)
 
-            # Загружаем в Yandex Cloud
-            yandex_file_id = await yandex_service.upload_file_to_yandex(content, file.filename)
+            # Загружаем в Yandex Cloud и добавляем в индекс
+            yandex_file_id = await yandex_service.upload_file_to_index(content, file.filename)
 
-            # Сохраняем запись в MongoDB со статусом "uploaded"
+            # Сохраняем запись в MongoDB со статусом "ready"
             file_record = await mongodb.create_file_record(
                 user_id=user_id,
                 filename=file.filename,
@@ -234,44 +130,20 @@ async def upload_files(
                 file_size=file_size,
                 yandex_file_id=yandex_file_id,
                 content=text_content,
-                binary_content="",  # Больше не храним в документе
+                binary_content="",
                 metadata=metadata or {},
-                status="uploaded"  # Ещё не в индексе
+                status="ready"
             )
 
-            # Сохраняем бинарный контент в GridFS (без лимита размера)
+            # Сохраняем бинарный контент в GridFS
             await mongodb.gridfs_upload(file_record["file_id"], file.filename, content)
 
             uploaded_files.append(file_record)
-            logger.info(f"✅ File uploaded: {file.filename}")
+            logger.info(f"✅ File uploaded and indexed: {file.filename} -> {yandex_file_id}")
 
         except Exception as e:
             logger.error(f"❌ Error uploading {file.filename}: {e}")
             errors.append(f"{file.filename}: {str(e)}")
-
-    return uploaded_files, errors
-
-
-async def upload_files_with_indexing(
-    user_id: str,
-    files: List[UploadFile],
-    metadata: Dict[str, Any] = None
-) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """
-    Загрузить файлы И запустить индексацию (синхронно).
-    Используется когда нужно дождаться индексации.
-    """
-    uploaded_files, errors = await upload_files(user_id, files, metadata)
-
-    if uploaded_files:
-        try:
-            await _rebuild_vector_store()
-            # Обновляем статус файлов на "ready"
-            for f in uploaded_files:
-                await mongodb.update_file_status(f["file_id"], "ready")
-        except Exception as e:
-            logger.error(f"❌ Failed to rebuild Vector Store: {e}")
-            errors.append(f"Ошибка индексации: {str(e)}")
 
     return uploaded_files, errors
 
@@ -320,58 +192,52 @@ async def get_file(file_id: str) -> Dict[str, Any]:
 
 
 async def delete_file(file_id: str) -> bool:
-    """Удалить файл и автоматически пересоздать Vector Store"""
+    """Удалить файл из индекса и базы данных"""
     file = await mongodb.delete_file_record(file_id)
 
     if not file:
         raise ValueError(f"Файл не найден: {file_id}")
 
-    # Удаляем из Yandex Cloud
+    # Удаляем из Yandex Cloud (индекс + storage)
     if file.get("yandex_file_id"):
-        await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
+        await yandex_service.delete_file_from_index(file["yandex_file_id"])
 
     # Удаляем из GridFS
     await mongodb.gridfs_delete(file_id)
-
-    try:
-        await _rebuild_vector_store()
-    except Exception as e:
-        logger.error(f"❌ Failed to rebuild Vector Store: {e}")
 
     logger.info(f"🗑️ File deleted: {file_id}")
     return True
 
 
 async def delete_all_files() -> int:
-    """Удалить ВСЕ файлы и очистить Vector Store"""
+    """Удалить ВСЕ файлы из индекса и базы данных"""
     files = await mongodb.get_all_active_files()
 
-    # Удаляем из Yandex Cloud и GridFS
+    # Удаляем каждый файл из Yandex Cloud и GridFS
     for file in files:
         if file.get("yandex_file_id"):
             try:
-                await yandex_service.delete_file_from_yandex(file["yandex_file_id"])
-            except:
-                pass
-        # Удаляем из GridFS
+                await yandex_service.delete_file_from_index(file["yandex_file_id"])
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to delete file from index: {e}")
+
         try:
             await mongodb.gridfs_delete(file["file_id"])
-        except:
+        except Exception:
             pass
 
     # Помечаем все как удалённые в MongoDB
     deleted_count = await mongodb.delete_all_files()
 
-    # Пересоздаём (удалим) Vector Store
-    try:
-        await _rebuild_vector_store()
-    except Exception as e:
-        logger.error(f"❌ Failed to rebuild Vector Store: {e}")
-
     logger.info(f"🗑️ Deleted all {deleted_count} files")
     return deleted_count
 
 
-async def get_current_vector_store_id() -> Optional[str]:
-    """Получить текущий Vector Store ID"""
-    return await mongodb.get_current_vector_store_id()
+async def get_index_info() -> Dict[str, Any]:
+    """Получить информацию об индексе"""
+    return await yandex_service.get_index_info()
+
+
+async def list_index_files(limit: int = 100) -> List[Dict[str, Any]]:
+    """Получить список файлов в индексе"""
+    return await yandex_service.list_index_files(limit)
