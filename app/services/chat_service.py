@@ -54,7 +54,7 @@ async def process_message(
             user_id=user_id,
             thread_id=thread_id,
             assistant_id=assistant_id,
-            vectorstore_id=settings.VECTOR_STORE_ID,
+            vectorstore_id=settings.SEARCH_INDEX_ID,
             chat_name=chat_name
         )
         

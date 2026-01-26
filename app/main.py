@@ -33,8 +33,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ MongoDB connection failed: {e}")
     
-    yandex_service.set_vector_store_id("")
-    logger.info("ℹ️ Vector Store: empty (will be created on first file upload)")
+    index_id = yandex_service.get_search_index_id()
+    if index_id:
+        logger.info(f"✅ Search Index configured: {index_id}")
+    else:
+        logger.warning("⚠️ SEARCH_INDEX_ID not configured!")
     
     if yandex_service.is_configured():
         logger.info("✅ Yandex Cloud ML configured")
@@ -111,11 +114,12 @@ async def health_check():
 
 @app.get("/", tags=["Root"])
 async def root():
-    vector_store_id = yandex_service.get_vector_store_id()
+    index_id = yandex_service.get_search_index_id()
     return {
         "service": "Evoblast Backend",
-        "version": "3.1.0",
-        "has_knowledge_base": bool(vector_store_id),
+        "version": "3.2.0",
+        "search_index_id": index_id,
+        "has_knowledge_base": bool(index_id),
         "docs": "/docs"
     }
 

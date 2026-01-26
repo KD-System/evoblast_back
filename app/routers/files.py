@@ -1,8 +1,10 @@
 """
-Роутер для работы с файлами
+Роутер для работы с файлами.
+
+Файлы загружаются напрямую в фиксированный индекс (SEARCH_INDEX_ID).
 """
 import logging
-from typing import List, Optional
+from typing import List
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 
@@ -14,7 +16,7 @@ from app.models.schemas import (
     FilesDeleteAllResponse,
     FileStatus,
 )
-from app.services import file_service
+from app.services import file_service, yandex_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +48,14 @@ def _to_file_info(f: dict) -> FileInfo:
     response_model=FileUploadResponse,
     summary="Загрузить файлы",
     description="""
-    Загрузка файлов с **фоновой индексацией**.
+    Загрузка файлов в базу знаний.
 
     **Ограничения:**
     - Максимум 10 файлов за раз
     - Максимальный размер: 30MB
     - Форматы: txt, pdf, doc, docx, md, json, csv, xls, xlsx
 
-    ✅ Ответ возвращается сразу после загрузки файлов.
-    ⏳ Индексация выполняется в фоне (~10-30 сек).
-    📊 Статус индексации: GET /api/evoblast/indexing-status
+    Файлы загружаются напрямую в индекс (SEARCH_INDEX_ID).
     """
 )
 async def upload_files(
@@ -65,19 +65,14 @@ async def upload_files(
     logger.info(f"📤 Upload from user: {user_id}, files: {len(files)}")
 
     try:
-        # Загружаем файлы (быстро)
         uploaded_files, errors = await file_service.upload_files(
             user_id=user_id,
             files=files
         )
 
-        # Запускаем индексацию в фоне (отменяет предыдущую если есть)
-        if uploaded_files:
-            file_service.start_indexing_task()
-
         file_infos = [_to_file_info(f) for f in uploaded_files]
 
-        message = f"✅ Загружено: {len(uploaded_files)}. ⏳ Индексация запущена в фоне."
+        message = f"✅ Загружено и проиндексировано: {len(uploaded_files)}"
         if errors:
             message += f" ⚠️ Ошибки: {'; '.join(errors)}"
 
@@ -92,25 +87,6 @@ async def upload_files(
     except Exception as e:
         logger.error(f"❌ Upload error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get(
-    "/indexing-status",
-    summary="Статус индексации",
-    description="Проверить статус фоновой индексации файлов"
-)
-async def get_indexing_status():
-    """Получить статус индексации"""
-    from app.services import yandex_service
-
-    status = file_service.get_indexing_status()
-    vector_store_id = yandex_service.get_vector_store_id()
-
-    return {
-        **status,
-        "vector_store_id": vector_store_id or None,
-        "has_knowledge_base": bool(vector_store_id)
-    }
 
 
 @router.get(
@@ -224,7 +200,7 @@ async def download_file(file_id: str):
     "/file/{file_id}",
     response_model=FileDeleteResponse,
     summary="Удалить файл",
-    description="Удаляет файл и **автоматически** пересоздаёт Vector Store"
+    description="Удаляет файл из индекса и базы данных"
 )
 async def delete_file(file_id: str):
     logger.info(f"🗑️ Deleting file: {file_id}")
@@ -233,7 +209,7 @@ async def delete_file(file_id: str):
         deleted = await file_service.delete_file(file_id)
 
         return FileDeleteResponse(
-            message="✅ Файл удалён, индекс обновлён",
+            message="✅ Файл удалён из индекса",
             file_id=file_id,
             deleted=deleted
         )
@@ -247,7 +223,7 @@ async def delete_file(file_id: str):
     "/files/all",
     response_model=FilesDeleteAllResponse,
     summary="Удалить ВСЕ файлы",
-    description="Удаляет ВСЕ файлы и очищает Vector Store"
+    description="Удаляет ВСЕ файлы из индекса и базы данных"
 )
 async def delete_all_files():
     """Удалить ВСЕ файлы"""
@@ -257,7 +233,7 @@ async def delete_all_files():
         deleted_count = await file_service.delete_all_files()
 
         return FilesDeleteAllResponse(
-            message=f"✅ Удалено файлов: {deleted_count}. Vector Store очищен.",
+            message=f"✅ Удалено файлов: {deleted_count}",
             user_id="all",
             deleted_count=deleted_count
         )
@@ -265,58 +241,48 @@ async def delete_all_files():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/vector-store", summary="Текущий Vector Store ID")
-async def get_vector_store():
-    """Получить текущий Vector Store ID"""
-    from app.services import yandex_service
-
-    vector_store_id = yandex_service.get_vector_store_id()
-    db_id = await file_service.get_current_vector_store_id()
-
-    return {
-        "current_vector_store_id": vector_store_id or None,
-        "db_vector_store_id": db_id or None,
-        "has_knowledge_base": bool(vector_store_id)
-    }
-
-
-@router.post(
-    "/reindex",
-    summary="Запустить индексацию",
-    description="""
-    Ручной запуск индексации Vector Store.
-
-    Используйте после массовой загрузки файлов.
-    Индексация выполняется в фоне.
-    """
+@router.get(
+    "/index-info",
+    summary="Информация об индексе",
+    description="Получить информацию о поисковом индексе (SEARCH_INDEX_ID)"
 )
-async def reindex():
-    """Запустить индексацию вручную"""
-    from app.database import mongodb
+async def get_index_info():
+    """Получить информацию об индексе"""
+    index_id = yandex_service.get_search_index_id()
 
-    logger.info("🔄 Manual reindex triggered")
-
-    try:
-        # Получаем количество файлов
-        files = await file_service.get_all_files()
-        files_count = len(files)
-
-        if files_count == 0:
-            return {
-                "message": "⚠️ Нет файлов для индексации",
-                "files_count": 0,
-                "status": "skipped"
-            }
-
-        # Запускаем индексацию в фоне
-        file_service.start_indexing_task()
-
+    if not index_id:
         return {
-            "message": f"✅ Индексация запущена для {files_count} файлов",
-            "files_count": files_count,
-            "status": "started"
+            "error": "SEARCH_INDEX_ID not configured",
+            "has_knowledge_base": False
         }
 
-    except Exception as e:
-        logger.error(f"❌ Reindex error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    info = await file_service.get_index_info()
+    info["has_knowledge_base"] = True
+
+    return info
+
+
+@router.get(
+    "/index-files",
+    summary="Файлы в индексе",
+    description="Получить список файлов, загруженных в поисковый индекс Yandex Cloud"
+)
+async def get_index_files(
+    limit: int = Query(default=100, le=100, description="Максимум файлов")
+):
+    """Получить список файлов в индексе"""
+    index_id = yandex_service.get_search_index_id()
+
+    if not index_id:
+        return {
+            "error": "SEARCH_INDEX_ID not configured",
+            "files": []
+        }
+
+    files = await file_service.list_index_files(limit)
+
+    return {
+        "index_id": index_id,
+        "files": files,
+        "total": len(files)
+    }

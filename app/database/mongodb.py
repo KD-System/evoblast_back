@@ -94,38 +94,6 @@ async def is_connected() -> bool:
 
 
 # ==========================================
-# SETTINGS Operations (для VECTOR_STORE_ID)
-# ==========================================
-
-async def get_current_vector_store_id() -> Optional[str]:
-    """Получить текущий VECTOR_STORE_ID из БД"""
-    db = get_database()
-    
-    doc = await db.settings.find_one({"key": "vector_store_id"})
-    if doc:
-        return doc.get("value")
-    return None
-
-
-async def set_current_vector_store_id(vector_store_id: str) -> None:
-    """Сохранить текущий VECTOR_STORE_ID в БД"""
-    db = get_database()
-    
-    await db.settings.update_one(
-        {"key": "vector_store_id"},
-        {
-            "$set": {
-                "key": "vector_store_id",
-                "value": vector_store_id,
-                "updated_at": datetime.utcnow()
-            }
-        },
-        upsert=True
-    )
-    logger.info(f"✅ Vector Store ID updated in DB: {vector_store_id}")
-
-
-# ==========================================
 # CHAT_THREADS Operations
 # ==========================================
 

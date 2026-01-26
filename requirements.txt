@@ -14,6 +14,9 @@ pymongo>=4.6.1
 # Yandex Cloud ML SDK
 yandex-cloud-ml-sdk>=0.2.0
 
+# OpenAI-compatible API client (for Yandex Cloud)
+openai>=1.0.0
+
 # JWT Auth
 python-jose[cryptography]>=3.3.0
 
