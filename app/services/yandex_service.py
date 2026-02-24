@@ -292,7 +292,7 @@ def _generate_answer_sync(question: str, context: str, history: List[Dict[str, s
             "Content-Type": "application/json"
         },
         json={
-            "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/yandexgpt/rc",
+            "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/aliceai-llm/latest",
             "completionOptions": {
                 "stream": False,
                 "temperature": 0.3,
