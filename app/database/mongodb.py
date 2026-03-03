@@ -153,8 +153,8 @@ async def get_user_chats(user_id: str) -> List[Dict[str, Any]]:
     """Получить список чатов пользователя"""
     db = get_database()
     
-    cursor = db.chat_threads.find({"user_id": user_id}).sort("created_at", -1)
-    return await cursor.to_list(length=100)
+    cursor = db.chat_threads.find({}).sort("created_at", -1)
+    return await cursor.to_list(length=None)
 
 
 async def delete_chat_thread(thread_id: str) -> bool:
