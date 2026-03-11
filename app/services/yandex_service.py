@@ -414,13 +414,13 @@ def _generate_chat_name_sync(message: str) -> str:
 - Максимум 5-6 слов
 - Без кавычек и лишних символов
 - Отражать суть вопроса/темы
-- Начинаться с маленькой буквы
+- Начинаться с заглавной буквы
 
 Примеры:
-- "как выращивать огурцы" → выращивание огурцов
-- "что такое любовь" → рассуждение о любви
-- "помоги написать код на python" → помощь с кодом на Python
-- "привет" → приветствие
+- "как выращивать огурцы" → Выращивание огурцов
+- "что такое любовь" → Рассуждение о любви
+- "помоги написать код на python" → Помощь с кодом на Python
+- "привет" → Приветствие
 
 Сообщение пользователя: {message}
 
@@ -449,6 +449,10 @@ def _generate_chat_name_sync(message: str) -> str:
         if response.status_code == 200:
             chat_name = response.json()["result"]["alternatives"][0]["message"]["text"].strip()
             chat_name = chat_name.strip('"\'«»')
+
+            # Первая буква — заглавная
+            if chat_name:
+                chat_name = chat_name[0].upper() + chat_name[1:]
 
             if not chat_name or len(chat_name) > 100:
                 chat_name = message[:50] if len(message) > 50 else message
