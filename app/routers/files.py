@@ -147,6 +147,44 @@ async def get_file(file_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/preview/{file_id}", summary="Просмотр файла в браузере")
+async def preview_file(file_id: str):
+    """Отдать файл с Content-Disposition: inline — браузер отобразит его, а не скачает"""
+    from urllib.parse import quote
+    from app.database import mongodb
+
+    try:
+        file_info = await file_service.get_file(file_id)
+        filename = file_info.get("filename", "file")
+
+        content = await mongodb.gridfs_download(file_id)
+        if not content:
+            raise HTTPException(status_code=404, detail="Контент файла не найден")
+
+        file_type = file_info.get("file_type", "").lower()
+        mime_types = {
+            "pdf":  "application/pdf",
+            "txt":  "text/plain; charset=utf-8",
+            "md":   "text/plain; charset=utf-8",
+            "json": "application/json",
+            "csv":  "text/csv; charset=utf-8",
+        }
+        media_type = mime_types.get(file_type, "application/octet-stream")
+
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}"
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Preview error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download/{file_id}", summary="Скачать файл")
 async def download_file(file_id: str):
     """Скачать файл из GridFS"""
